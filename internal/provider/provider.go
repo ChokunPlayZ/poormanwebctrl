@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -39,6 +40,12 @@ func WebServer(c config.Config, p platform.Platform) (plan.Plan, error) { return
 // It is used by the TUI so operators can inspect and apply firewall changes
 // without re-running the complete server configuration.
 func Firewall(c config.Config, p platform.Platform) (plan.Plan, error) {
+	if !c.Firewall.Enabled {
+		return plan.Plan{}, fmt.Errorf("firewall policy is disabled in the configuration")
+	}
+	if c.Firewall.Enabled && p.Family != "debian" && p.Family != "rhel" {
+		return plan.Plan{}, fmt.Errorf("firewall policy management is not supported for %s", p.Distro)
+	}
 	result := plan.Plan{Platform: p.Distro}
 	if c.Firewall.Enabled {
 		if p.Family == "debian" {
@@ -58,7 +65,7 @@ func FirewallStatus(p platform.Platform) (plan.Plan, error) {
 	} else if p.Family == "rhel" {
 		result.Add(plan.Cmd("Show firewalld status", "firewall-cmd", false, "--state"))
 	} else {
-		result.Warn("Alpine firewall status is not managed by poorman")
+		return plan.Plan{}, fmt.Errorf("firewall status is not supported for %s", p.Distro)
 	}
 	return result, nil
 }
@@ -182,7 +189,8 @@ func packageSet(c config.Config, p platform.Platform) []string {
 	if c.Backups.Enabled {
 		set["rsync"] = true
 	}
-	if anyWordPress(c) {
+	writableWordPress := anyWordPress(c) && (c.Database == nil || c.Database.Role != "replica")
+	if writableWordPress {
 		set["curl"] = true
 		set["tar"] = true
 	}
@@ -339,7 +347,7 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if !(d.Provider == "postgresql" && d.Role == "replica") {
 		pn.Add(enableService(p, service))
 	}
-	if d.Name != "" && d.User != "" {
+	if d.Role != "replica" && d.Name != "" && d.User != "" {
 		if d.Provider == "postgresql" {
 			input := fmt.Sprintf("SELECT format('CREATE ROLE %%I LOGIN PASSWORD %%L', '%s', '${%s}') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')\\gexec\nSELECT format('CREATE DATABASE %%I OWNER %%I', '%s', '%s') WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')\\gexec\n", d.User, d.PasswordEnv, d.User, d.Name, d.User, d.Name)
 			step := plan.AsUser("Create PostgreSQL application database and user", "postgres", "psql")
@@ -371,7 +379,10 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 			port = fmt.Sprintf("port=%d\n", d.Port)
 		}
 		conf := fmt.Sprintf("# Managed by poorman\n[mariadb]\nserver_id=%s\n%slog_bin=mysql-bin\nbinlog_format=ROW\ngtid_strict_mode=ON\nread_only=%s\nbind_address=0.0.0.0\n", serverID, port, readOnly)
-		pn.Add(plan.ManagedFile("Configure MariaDB "+d.Role, "/etc/mysql/mariadb.conf.d/90-poorman-replication.cnf", conf, "root", 0o644))
+		pn.Add(plan.ManagedFile("Configure MariaDB "+d.Role, mariaDBReplicationConfigPath(p), conf, "root", 0o644))
+		// Load the GTID, read-only, and optional port settings before sending
+		// replication SQL to this server.
+		pn.Add(restartService(p, "mariadb"))
 		if d.Role == "primary" {
 			input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", r.User, r.PasswordEnv, r.User)
 			step := plan.Cmd("Create MariaDB replication user", "mariadb", true)
@@ -387,7 +398,6 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 			pn.Add(step)
 		}
-		pn.Add(restartService(p, "mariadb"))
 		return
 	}
 	if d.Role == "primary" {
@@ -401,8 +411,12 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		pn.Warn(fmt.Sprintf("Add this exact PostgreSQL pg_hba.conf rule, then reload: host replication %s %s scram-sha-256", r.User, r.AllowedCIDR))
 	} else {
 		dataDir := databaseDataDir(d, p)
-		pn.Add(stopService(p, "postgresql"))
-		pn.Add(plan.Cmd("Verify PostgreSQL replica data directory is uninitialized", "test", true, "!", "-e", filepath.Join(dataDir, "PG_VERSION")))
+		// A loopback primary is the local system instance that pg_basebackup
+		// needs to contact, so leave it running while bootstrapping the separate
+		// replica data directory.
+		if !isLoopbackHost(r.PrimaryHost) {
+			pn.Add(stopService(p, "postgresql"))
+		}
 		args := []string{"-h", r.PrimaryHost, "-U", r.User, "-D", dataDir, "-R", "-X", "stream", "-P"}
 		if r.PrimaryPort > 0 {
 			args = append(args, "-p", strconv.Itoa(r.PrimaryPort))
@@ -412,6 +426,7 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		}
 		step := plan.AsUser("Bootstrap PostgreSQL replica from primary", "postgres", "pg_basebackup", args...)
 		step.Input, step.Sensitive = "${"+r.PasswordEnv+"}\n", true
+		step.UnlessCommand, step.UnlessArgs = "test", []string{"-e", filepath.Join(dataDir, "PG_VERSION")}
 		pn.Add(step)
 		if d.Port > 0 {
 			pn.Add(plan.EnsureLine("Set PostgreSQL replica port", filepath.Join(dataDir, "postgresql.conf"), fmt.Sprintf("port = %d", d.Port)))
@@ -419,10 +434,19 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		pn.Warn("PostgreSQL replica bootstrap requires an empty data directory and a maintenance window; take a verified backup first")
 	}
 	if d.Role == "replica" && d.Port > 0 {
-		pn.Add(plan.AsUser("Start PostgreSQL replica instance", "postgres", "pg_ctl", "-D", databaseDataDir(d, p), "-l", filepath.Join(databaseDataDir(d, p), "poorman.log"), "start"))
+		step := plan.AsUser("Start PostgreSQL replica instance", "postgres", "pg_ctl", "-D", databaseDataDir(d, p), "-l", filepath.Join(databaseDataDir(d, p), "poorman.log"), "start")
+		step.UnlessCommand, step.UnlessArgs = "pg_isready", []string{"-h", "127.0.0.1", "-p", strconv.Itoa(d.Port)}
+		pn.Add(step)
 	} else {
 		pn.Add(restartService(p, "postgresql"))
 	}
+}
+
+func mariaDBReplicationConfigPath(p platform.Platform) string {
+	if p.Family == "debian" {
+		return "/etc/mysql/mariadb.conf.d/90-poorman-replication.cnf"
+	}
+	return "/etc/my.cnf.d/90-poorman-replication.cnf"
 }
 
 func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
@@ -437,7 +461,8 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if service == "openlitespeed" {
 		service = "lsws"
 	}
-	if anyWordPress(c) {
+	writableWordPress := anyWordPress(c) && (c.Database == nil || c.Database.Role != "replica")
+	if writableWordPress {
 		download := plan.Cmd("Download wp-cli", "curl", true, "-fsSL", "-o", "/tmp/poorman-wp-cli.phar", "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar")
 		download.UnlessCommand, download.UnlessArgs = "wp", []string{"--info"}
 		install := plan.Cmd("Install wp-cli", "install", true, "-m", "0755", "/tmp/poorman-wp-cli.phar", "/usr/local/bin/wp")
@@ -463,7 +488,7 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 		pn.Add(plan.Dir("Create document root for "+s.Domain, s.Root, owner, 0o750))
 		path, content := siteConfig(c.WebServer.Provider, s, p)
 		pn.Add(plan.ManagedFile("Configure virtual host "+s.Domain, path, content, "root", 0o644))
-		if s.WordPress != nil {
+		if s.WordPress != nil && writableWordPress {
 			pn.Add(plan.AsUser("Download WordPress for "+s.Domain, owner, "wp", "core", "download", "--path="+s.Root))
 			if c.Database != nil {
 				step := plan.AsUser("Create WordPress configuration for "+s.Domain, owner, "wp", "config", "create", "--path="+s.Root, "--dbname="+c.Database.Name, "--dbuser="+c.Database.User, "--prompt=dbpass")
@@ -479,6 +504,9 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 			step.Input, step.Sensitive = "${"+wp.AdminPassEnv+"}\n", true
 			pn.Add(step)
 		}
+	}
+	if anyWordPress(c) && !writableWordPress {
+		pn.Warn("Skipped WordPress download, configuration, and installation because database.role=replica is read-only")
 	}
 	pn.Add(plan.Cmd("Validate "+c.WebServer.Provider+" configuration", validationCommand(c.WebServer.Provider), true, validationArgs(c.WebServer.Provider)...))
 	pn.Add(restartService(p, service))
@@ -716,5 +744,12 @@ func defaultString(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 func shellQuote(v string) string { return "'" + strings.ReplaceAll(v, "'", "'\\''") + "'" }

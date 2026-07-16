@@ -53,7 +53,8 @@ poorman status [-f FILE]            run health checks
 poorman backup [--yes]              run the installed backup job now
 poorman replica status [-f FILE]    show replication health/lag data
 poorman replica promote [-f FILE]   promote a configured replica
-poorman replica setup [-f FILE]     guided replica configuration
+poorman replica setup [-f FILE] [--from PRIMARY_FILE]
+                                      guided replica configuration
 ```
 
 When a configuration already exists, `poorman tui` opens the operations dashboard. Choose **long-term operations** for read-only host capacity, recent systemd journal logs for configured services, and the files currently present in the configured backup destination.
@@ -70,6 +71,7 @@ Configuration stores environment-variable names, never passwords. Export the val
 
 ```sh
 export POORMAN_DB_PASSWORD='use-a-password-manager-generated-value'
+export POORMAN_REPLICATION_PASSWORD='a-separate-replication-password'
 export POORMAN_WP_ADMIN_PASSWORD='another-unique-value'
 ./bin/poorman apply
 ```
@@ -80,7 +82,7 @@ Secret-backed command input is redacted from plans. SQL secrets are escaped befo
 
 Create one configuration per database node. Set `database.role` to `primary` or `replica`, give every MariaDB node a unique `node_id`, and restrict the primary with `allowed_cidr`. See [PostgreSQL primary](examples/postgresql-primary.json) and [PostgreSQL replica](examples/postgresql-replica.json).
 
-For a primary and replica on the same machine, create a separate replica file with `poorman replica setup -f replica.json --from primary.json`, then answer yes when guided setup asks whether the primary is local. It uses `127.0.0.1` and separate ports by default (`5432`/`5433` for PostgreSQL or `3306`/`3307` for MariaDB); change them if those ports are already in use. PostgreSQL replicas also get a dedicated data directory and instance start command.
+For a PostgreSQL primary and replica on the same machine, create a separate replica file with `poorman replica setup -f replica.json --from primary.json`, then answer yes when guided setup asks whether the primary is local. It uses `127.0.0.1`, separate ports (`5432`/`5433` by default), a dedicated replica data directory, and a separate instance start command. MariaDB replicas currently require a separate host because poorman manages one MariaDB service and configuration per machine.
 
 Promotion is deliberately guarded. Before running it, fence the failed primary to prevent split brain. `poorman replica promote` requires typing `PROMOTE` unless `--yes` is supplied.
 

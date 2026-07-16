@@ -235,6 +235,18 @@ func (c Config) Validate() error {
 			if d.Role == "replica" && net.ParseIP(r.PrimaryHost) == nil && !validDomain(r.PrimaryHost) {
 				return fmt.Errorf("database replica requires a valid primary_host")
 			}
+			if d.Provider == "mariadb" && d.Role == "replica" && isLoopbackHost(r.PrimaryHost) {
+				return fmt.Errorf("same-machine MariaDB replicas are not supported; use a separate host")
+			}
+			if d.Provider == "postgresql" && d.Role == "replica" && isLoopbackHost(r.PrimaryHost) {
+				primaryPort := r.PrimaryPort
+				if primaryPort == 0 {
+					primaryPort = 5432
+				}
+				if d.Port == 0 || d.Port == primaryPort {
+					return fmt.Errorf("same-machine PostgreSQL replica requires an explicit port different from primary_port")
+				}
+			}
 			if d.Role == "primary" {
 				if _, _, err := net.ParseCIDR(r.AllowedCIDR); err != nil {
 					return fmt.Errorf("database primary requires a valid replication allowed_cidr")
@@ -260,6 +272,14 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validDomain(s string) bool {
@@ -289,8 +309,36 @@ func Write(path string, c Config) error {
 		return err
 	}
 	b = append(b, '\n')
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temporary config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set temporary config permissions: %w", err)
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
+	committed = true
 	return nil
 }

@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"time"
 )
 
 // Stats prints a compact snapshot of the host. Each command is optional so a
@@ -68,18 +71,46 @@ func BackupFiles(ctx context.Context, destination string, out io.Writer) error {
 	if destination == "" {
 		return fmt.Errorf("no backup destination is configured")
 	}
-	output, err := exec.CommandContext(ctx, "find", destination, "-maxdepth", "1", "-type", "f", "-printf", "%TY-%Tm-%Td %TH:%TM  %s bytes  %f\\n").CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail == "" {
-			detail = err.Error()
-		}
-		return fmt.Errorf("list backups: %s", detail)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if strings.TrimSpace(string(output)) == "" {
-		fmt.Fprintln(out, "No backup files found.")
+	entries, err := os.ReadDir(destination)
+	if err != nil {
+		return fmt.Errorf("list backups: %w", err)
+	}
+	type artifact struct {
+		name  string
+		mode  os.FileMode
+		size  int64
+		mtime time.Time
+	}
+	artifacts := make([]artifact, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect backup %s: %w", entry.Name(), err)
+		}
+		artifacts = append(artifacts, artifact{name: entry.Name(), mode: info.Mode(), size: info.Size(), mtime: info.ModTime()})
+	}
+	if len(artifacts) == 0 {
+		fmt.Fprintln(out, "No backup runs found.")
 		return nil
 	}
-	fmt.Fprint(out, string(output))
+	sort.Slice(artifacts, func(i, j int) bool {
+		if artifacts[i].mtime.Equal(artifacts[j].mtime) {
+			return artifacts[i].name < artifacts[j].name
+		}
+		return artifacts[i].mtime.After(artifacts[j].mtime)
+	})
+	for _, item := range artifacts {
+		kind := fmt.Sprintf("%d bytes", item.size)
+		if item.mode.IsDir() {
+			kind = "backup run"
+		}
+		fmt.Fprintf(out, "%s  %-12s  %s\n", item.mtime.Format("2006-01-02 15:04"), kind, item.name)
+	}
 	return nil
 }

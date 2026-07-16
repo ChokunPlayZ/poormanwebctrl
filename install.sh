@@ -18,8 +18,6 @@ done
 case "$(uname -s):$(uname -m)" in
 	Linux:x86_64|Linux:amd64) os=linux; arch=amd64 ;;
 	Linux:aarch64|Linux:arm64) os=linux; arch=arm64 ;;
-	Darwin:x86_64|Darwin:amd64) os=darwin; arch=amd64 ;;
-	Darwin:arm64) os=darwin; arch=arm64 ;;
 	*) echo "poorman installer: unsupported platform $(uname -s)/$(uname -m)" >&2; exit 1 ;;
 esac
 

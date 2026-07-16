@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -50,9 +52,15 @@ func RunContext(ctx context.Context, args []string, in io.Reader, out, errOut io
 	case "backup":
 		return backupCommand(ctx, args[1:], in, out, errOut)
 	case "version", "--version", "-v":
+		if len(args) > 1 {
+			return fmt.Errorf("unexpected argument %q", args[1])
+		}
 		fmt.Fprintln(out, version)
 		return nil
 	case "help", "--help", "-h":
+		if len(args) > 1 {
+			return fmt.Errorf("unexpected argument %q", args[1])
+		}
 		usage(out)
 		return nil
 	default:
@@ -69,7 +77,9 @@ Usage:
   poorman apply [-f poorman.json] [--yes]
   poorman tui [-f poorman.json]
   poorman status [-f poorman.json]
-	poorman replica status|promote|setup [-f poorman.json] [--from primary.json]
+  poorman replica setup [-f replica.json] [--from primary.json]
+  poorman replica status [-f poorman.json]
+  poorman replica promote [-f poorman.json] [--yes]
   poorman backup [--yes]
   poorman version
 
@@ -78,9 +88,15 @@ Start with "poorman init", edit the file, then preview with "poorman plan".`)
 
 func statusCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	c, err := config.Load(*path)
@@ -96,17 +112,29 @@ func statusCommand(ctx context.Context, args []string, out io.Writer) error {
 
 func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("replica requires status or promote")
+		return fmt.Errorf("replica requires setup, status, or promote")
 	}
 	action := args[0]
 	if action == "setup" {
 		return guidedReplicaSetup(args[1:], in, out)
 	}
+	if action != "status" && action != "promote" {
+		return fmt.Errorf("unknown replica action %q", action)
+	}
 	fs := flag.NewFlagSet("replica "+action, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
-	yes := fs.Bool("yes", false, "confirm replica promotion")
+	yes := false
+	if action == "promote" {
+		fs.BoolVar(&yes, "yes", false, "confirm replica promotion")
+	}
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	c, err := config.Load(*path)
@@ -122,15 +150,13 @@ func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOu
 		operation, err = provider.ReplicaStatus(c, p)
 	} else if action == "promote" {
 		operation, err = provider.PromoteReplica(c, p)
-	} else {
-		return fmt.Errorf("unknown replica action %q", action)
 	}
 	if err != nil {
 		return err
 	}
 	reader := inputReader(in)
 	operation.Print(out)
-	if action == "promote" && !*yes {
+	if action == "promote" && !yes {
 		fmt.Fprint(out, "Type PROMOTE to confirm the old primary is fenced: ")
 		answer, _ := reader.ReadString('\n')
 		if strings.TrimSpace(answer) != "PROMOTE" {
@@ -145,9 +171,15 @@ func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOu
 
 func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	yes := fs.Bool("yes", false, "skip confirmation")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	operation := plan.Plan{Platform: "local", Steps: []plan.Step{plan.Cmd("Run configured backup", "/usr/local/sbin/poorman-backup", true)}}
@@ -168,9 +200,15 @@ func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut
 
 func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	ui := newTerminalUI(out)
@@ -200,14 +238,16 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 	var database *config.Database
 	if dbChoice != "none" {
 		database = &config.Database{Provider: dbChoice, Role: strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", "standalone")), Name: prompt(reader, ui, "Database name", "website"), User: prompt(reader, ui, "Database user", "website"), PasswordEnv: "POORMAN_DB_PASSWORD"}
-		configureReplication(reader, ui, database)
+		if err := configureReplication(reader, ui, database); err != nil {
+			return err
+		}
 	}
 	var wordpress *config.WordPress
-	if runtimeName == "php" && database != nil && database.Role != "replica" && strings.EqualFold(prompt(reader, ui, "Install WordPress? (y/N)", "n"), "y") {
+	if runtimeName == "php" && database != nil && database.Role != "replica" && yesNo(prompt(reader, ui, "Install WordPress? (y/N)", "n")) {
 		wordpress = &config.WordPress{Title: domain, AdminUser: "admin", AdminEmail: prompt(reader, ui, "WordPress admin email", "admin@"+domain), AdminPassEnv: "POORMAN_WP_ADMIN_PASSWORD"}
 	}
-	tlsEnabled := strings.EqualFold(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", "y"), "y")
-	backupEnabled := strings.EqualFold(prompt(reader, ui, "Enable nightly backups? (Y/n)", "y"), "y")
+	tlsEnabled := yesNo(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", "y"))
+	backupEnabled := yesNo(prompt(reader, ui, "Enable nightly backups? (Y/n)", "y"))
 
 	c := config.Config{
 		Version:   1,
@@ -227,9 +267,9 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 	return nil
 }
 
-func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config.Database) {
+func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config.Database) error {
 	if database.Role == "standalone" {
-		return
+		return nil
 	}
 	database.Replication.User = prompt(reader, ui, "Replication user", defaultValue(database.Replication.User, "replicator"))
 	database.Replication.PasswordEnv = prompt(reader, ui, "Replication password environment variable", defaultValue(database.Replication.PasswordEnv, "POORMAN_REPLICATION_PASSWORD"))
@@ -237,11 +277,21 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 		database.Replication.AllowedCIDR = prompt(reader, ui, "Replica allowed CIDR", defaultValue(database.Replication.AllowedCIDR, "10.20.0.0/24"))
 		if database.Provider == "postgresql" {
 			database.Replication.Slot = prompt(reader, ui, "PostgreSQL replication slot", defaultValue(database.Replication.Slot, "poorman_replica_1"))
+		} else {
+			nodeDefault := "1"
+			if database.Replication.NodeID > 0 {
+				nodeDefault = strconv.Itoa(database.Replication.NodeID)
+			}
+			nodeID := prompt(reader, ui, "MariaDB primary node ID", nodeDefault)
+			database.Replication.NodeID, _ = strconv.Atoi(nodeID)
 		}
-		return
+		return nil
 	}
 	if database.Role == "replica" {
 		local := yesNo(prompt(reader, ui, "Is the primary on this machine? (y/N)", "n"))
+		if local && database.Provider == "mariadb" {
+			return fmt.Errorf("same-machine MariaDB replicas are not supported yet; use a separate host or PostgreSQL")
+		}
 		primaryHostDefault := "10.20.0.10"
 		if local {
 			primaryHostDefault = "127.0.0.1"
@@ -251,7 +301,8 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 		if database.Provider == "mariadb" {
 			primaryPort = 3306
 		}
-		database.Replication.PrimaryPort = promptPort(reader, ui, "Primary database port", database.Replication.PrimaryPort, primaryPort)
+		primaryPort = promptPort(reader, ui, "Primary database port", database.Replication.PrimaryPort, primaryPort)
+		database.Replication.PrimaryPort = primaryPort
 		if local {
 			replicaPort := primaryPort + 1
 			database.Port = promptPort(reader, ui, "Replica database port", database.Port, replicaPort)
@@ -259,7 +310,11 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 		}
 		if database.Provider == "postgresql" {
 			database.Replication.Slot = prompt(reader, ui, "PostgreSQL replication slot", defaultValue(database.Replication.Slot, "poorman_replica_1"))
-			database.DataDir = prompt(reader, ui, "PostgreSQL data directory", defaultValue(database.DataDir, "/var/lib/postgresql/18/main"))
+			dataDirDefault := "/var/lib/postgresql/18/main"
+			if local {
+				dataDirDefault = "/var/lib/postgresql/poorman-replica"
+			}
+			database.DataDir = prompt(reader, ui, "PostgreSQL data directory", defaultValue(database.DataDir, dataDirDefault))
 		} else {
 			nodeDefault := "2"
 			if database.Replication.NodeID > 0 {
@@ -269,6 +324,7 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 			database.Replication.NodeID, _ = strconv.Atoi(nodeID)
 		}
 	}
+	return nil
 }
 
 func promptPort(reader *bufio.Reader, ui *terminalUI, label string, current, fallback int) int {
@@ -284,15 +340,23 @@ func promptPort(reader *bufio.Reader, ui *terminalUI, label string, current, fal
 
 func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("replica setup", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
 	from := fs.String("from", "", "existing primary or stack configuration to copy")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	c := config.Default()
 	var err error
+	loadedTarget := false
 	if _, statErr := os.Stat(*path); statErr == nil {
+		loadedTarget = true
 		c, err = config.Load(*path)
 		if err != nil {
 			return err
@@ -317,17 +381,51 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	if c.Database != nil {
 		copy := *c.Database
 		database = &copy
-		database.Provider = providerName
-		database.Role = "replica"
 	}
-	configureReplication(reader, ui, database)
+	normalizeReplicaDatabase(database, providerName)
+	if err := configureReplication(reader, ui, database); err != nil {
+		return err
+	}
 	c.Database = database
 	if err := config.Write(*path, c); err != nil {
 		return err
 	}
+	if !loadedTarget && *from != "" {
+		if err := copyConfigSecrets(*from, *path, c); err != nil {
+			return err
+		}
+	}
 	ui.success(fmt.Sprintf("Replica configuration saved to %s", *path))
 	ui.muted(fmt.Sprintf("Preview it with: poorman plan -f %s", *path))
 	return nil
+}
+
+// normalizeReplicaDatabase keeps shared credentials while removing topology
+// that belongs to the source node. Existing replica files keep their local
+// port, data directory, and node ID when edited.
+func normalizeReplicaDatabase(database *config.Database, providerName string) {
+	sourceProvider, sourceRole := database.Provider, database.Role
+	database.Provider = providerName
+	if sourceRole != "replica" || sourceProvider != providerName {
+		sourcePort := database.Port
+		sourceNodeID := database.Replication.NodeID
+		database.Port = 0
+		database.DataDir = ""
+		database.Replication.PrimaryHost = ""
+		database.Replication.PrimaryPort = 0
+		if sourceProvider == providerName {
+			database.Replication.PrimaryPort = sourcePort
+		}
+		if providerName == "mariadb" {
+			database.Replication.NodeID = 2
+			if sourceProvider == providerName && sourceNodeID > 0 {
+				database.Replication.NodeID = sourceNodeID + 1
+			}
+		} else {
+			database.Replication.NodeID = 0
+		}
+	}
+	database.Role = "replica"
 }
 
 func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
@@ -357,10 +455,18 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 				ui.warn("Health warning: " + err.Error())
 			}
 		case "4":
+			if !c.Backups.Enabled {
+				ui.warn("Backups are disabled in Stack settings.")
+				continue
+			}
 			if err := backupCommand(ctx, nil, reader, ui, ui); err != nil {
 				return err
 			}
 		case "5":
+			if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
+				ui.warn("Replication is not configured. Use guided replica setup or Stack settings first.")
+				continue
+			}
 			if err := replicaCommand(ctx, []string{"status", "-f", path}, reader, ui, ui); err != nil {
 				ui.warn("Replication status unavailable: " + err.Error())
 			}
@@ -381,7 +487,11 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 				ui.warn("Stack settings unavailable: " + err.Error())
 			}
 		case "10":
-			if err := guidedReplicaSetupTUI(ctx, path, reader, ui); err != nil {
+			replicaPath, err := guidedReplicaSetupTUI(ctx, path, reader, ui)
+			if replicaPath != "" {
+				path = replicaPath
+			}
+			if err != nil {
 				ui.warn("Replica setup unavailable: " + err.Error())
 			}
 		case "0", "q", "Q":
@@ -392,28 +502,29 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 	}
 }
 
-func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) error {
+func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) (string, error) {
 	ui.clear()
 	ui.brand("guided replica setup", "Create a separate replica configuration from this stack")
-	replicaPath := prompt(reader, ui, "Replica configuration file", "replica.json")
-	if replicaPath == primaryPath {
-		return fmt.Errorf("replica configuration must be different from the primary configuration")
+	defaultPath := filepath.Join(filepath.Dir(primaryPath), "replica.json")
+	replicaPath := filepath.Clean(prompt(reader, ui, "Replica configuration file", defaultPath))
+	if replicaPath == filepath.Clean(primaryPath) {
+		return "", fmt.Errorf("replica configuration must be different from the primary configuration")
 	}
 	if err := guidedReplicaSetup([]string{"-f", replicaPath, "--from", primaryPath}, reader, ui); err != nil {
-		return err
+		return "", err
 	}
-	if strings.EqualFold(prompt(reader, ui, "Preview the replica plan now? (Y/n)", "y"), "y") {
+	if yesNo(prompt(reader, ui, "Preview the replica plan now? (Y/n)", "y")) {
 		if err := planCommand([]string{"-f", replicaPath}, ui); err != nil {
-			return err
+			return replicaPath, err
 		}
 	}
-	if strings.EqualFold(prompt(reader, ui, "Apply the replica configuration now? (y/N)", "n"), "y") {
+	if yesNo(prompt(reader, ui, "Apply the replica configuration now? (y/N)", "n")) {
 		// The guided prompt is already the user's confirmation. Passing --yes
 		// avoids asking for a second confirmation and consuming the next TUI input.
-		return applyCommand(ctx, []string{"-f", replicaPath, "--yes"}, reader, ui, ui)
+		return replicaPath, applyCommand(ctx, []string{"-f", replicaPath, "--yes"}, reader, ui, ui)
 	}
 	ui.muted(fmt.Sprintf("Replica configuration is ready: poorman apply -f %s", replicaPath))
-	return nil
+	return replicaPath, nil
 }
 
 func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
@@ -475,8 +586,21 @@ func adjustDatabase(c *config.Config, reader *bufio.Reader, ui *terminalUI) erro
 		c.Database = nil
 		return nil
 	}
-	database := &config.Database{Provider: providerName, Role: strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", currentRole)), Name: prompt(reader, ui, "Database name", name), User: prompt(reader, ui, "Database user", user), PasswordEnv: prompt(reader, ui, "Database password environment variable", passwordEnv)}
-	configureReplication(reader, ui, database)
+	database := &config.Database{}
+	if c.Database != nil {
+		// Stack settings should not silently discard advanced values such as a
+		// custom port, data directory, slot, or replication node ID.
+		copy := *c.Database
+		database = &copy
+	}
+	database.Provider = providerName
+	database.Role = strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", currentRole))
+	database.Name = prompt(reader, ui, "Database name", name)
+	database.User = prompt(reader, ui, "Database user", user)
+	database.PasswordEnv = prompt(reader, ui, "Database password environment variable", passwordEnv)
+	if err := configureReplication(reader, ui, database); err != nil {
+		return err
+	}
 	c.Database = database
 	return nil
 }
@@ -496,7 +620,12 @@ func enabledDefault(enabled bool) string {
 }
 
 func yesNo(value string) bool {
-	return strings.EqualFold(strings.TrimSpace(value), "y")
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "y", "yes", "true", "1":
+		return true
+	default:
+		return false
+	}
 }
 
 func vhostsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
@@ -585,7 +714,7 @@ func removeVHost(path string, c config.Config, reader *bufio.Reader, ui *termina
 		return err
 	}
 	site := c.Sites[i]
-	if strings.ToLower(prompt(reader, ui, "Remove "+site.Domain+"? (y/N)", "n")) != "y" {
+	if !yesNo(prompt(reader, ui, "Remove "+site.Domain+"? (y/N)", "n")) {
 		ui.muted("Cancelled.")
 		return nil
 	}
@@ -640,7 +769,11 @@ func operationsTUI(ctx context.Context, c config.Config, reader *bufio.Reader, u
 		ui.clear()
 		ui.brand("Long-term operations", "Inspect the host and keep services healthy")
 		ui.panel("READ-ONLY", "These views do not change server state")
-		ui.panel("ACTIONS", "1  host resource stats\n2  recent service logs\n3  backup inventory\n0  back")
+		backupAction := "backup inventory"
+		if !c.Backups.Enabled {
+			backupAction += " (disabled)"
+		}
+		ui.panel("ACTIONS", "1  host resource stats\n2  recent service logs\n3  "+backupAction+"\n0  back")
 		switch prompt(reader, ui, "Select action", "1") {
 		case "1":
 			ui.clear()
@@ -682,6 +815,11 @@ func operationsTUI(ctx context.Context, c config.Config, reader *bufio.Reader, u
 		case "3":
 			ui.clear()
 			ui.brand("Backup inventory", "Review artifacts produced by the configured backup job")
+			if !c.Backups.Enabled {
+				ui.warn("Backups are disabled in Stack settings.")
+				pause(reader, ui)
+				continue
+			}
 			ui.muted("Destination: " + c.Backups.Destination)
 			if err := ops.BackupFiles(ctx, c.Backups.Destination, ui); err != nil {
 				ui.warn(err.Error())
@@ -751,7 +889,11 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 		ui.clear()
 		ui.brand("Firewall management", "Review and apply the host access policy")
 		ui.panel("POLICY", "Configured policy  "+ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled))
-		ui.panel("ACTIONS", "1  show firewall status\n2  preview configured policy\n3  apply configured policy\n4  disable firewall\n0  back")
+		policySuffix := ""
+		if !c.Firewall.Enabled {
+			policySuffix = " (disabled)"
+		}
+		ui.panel("ACTIONS", "1  show firewall status\n2  preview configured policy"+policySuffix+"\n3  apply configured policy"+policySuffix+"\n4  disable firewall\n0  back")
 		switch prompt(reader, ui, "Select action", "1") {
 		case "1":
 			operation, err := provider.FirewallStatus(p)
@@ -763,12 +905,20 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 				ui.warn("Status check failed: " + err.Error())
 			}
 		case "2":
+			if !c.Firewall.Enabled {
+				ui.warn("Firewall policy is disabled in Stack settings.")
+				continue
+			}
 			operation, err := provider.Firewall(c, p)
 			if err != nil {
 				return err
 			}
 			operation.Print(ui)
 		case "3":
+			if !c.Firewall.Enabled {
+				ui.warn("Firewall policy is disabled in Stack settings.")
+				continue
+			}
 			operation, err := provider.Firewall(c, p)
 			if err != nil {
 				return err
@@ -876,10 +1026,18 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s (%s)\nsite      %s\nconfig    %s", c.WebServer.Provider, db, role, site, path))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
-	ui.panel("ACTIONS", dashboardActionLine(1, 5, selected, "preview plan", "replication status")+"\n"+
+	replicationAction := "replication status"
+	if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
+		replicationAction += " (not configured)"
+	}
+	backupAction := "run backup"
+	if !c.Backups.Enabled {
+		backupAction += " (disabled)"
+	}
+	ui.panel("ACTIONS", dashboardActionLine(1, 5, selected, "preview plan", replicationAction)+"\n"+
 		dashboardActionLine(2, 6, selected, "apply configuration", "Firewall management")+"\n"+
 		dashboardActionLine(3, 7, selected, "health status", "long-term operations")+"\n"+
-		dashboardActionLine(4, 8, selected, "run backup", "Virtual hosts")+"\n"+
+		dashboardActionLine(4, 8, selected, backupAction, "Virtual hosts")+"\n"+
 		dashboardActionLine(9, 10, selected, "Stack settings", "guided replica setup")+"\n"+dashboardActionLine(0, -1, selected, "exit", ""))
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
 }
@@ -1011,9 +1169,15 @@ func prompt(reader *bufio.Reader, out io.Writer, label, fallback string) string 
 
 func initCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	if _, err := os.Stat(*path); err == nil {
@@ -1042,9 +1206,15 @@ func buildPlan(path string) (interface{ Print(io.Writer) }, error) {
 
 func planCommand(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	p, err := buildPlan(*path)
@@ -1057,10 +1227,16 @@ func planCommand(args []string, out io.Writer) error {
 
 func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs.SetOutput(out)
 	path := fs.String("f", "poorman.json", "configuration file")
 	yes := fs.Bool("yes", false, "skip confirmation")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
 	c, err := config.Load(*path)
@@ -1085,7 +1261,7 @@ func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut 
 			return nil
 		}
 	}
-	if err := ensureDatabasePassword(c, *path, out); err != nil {
+	if err := ensureConfigSecrets(c, *path, out); err != nil {
 		return err
 	}
 	err = executor.Apply(ctx, p, reader, out, errOut)
@@ -1093,49 +1269,168 @@ func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut 
 	return err
 }
 
-func ensureDatabasePassword(c config.Config, configPath string, out io.Writer) error {
-	if c.Database == nil || c.Database.PasswordEnv == "" {
+func requireNoArgs(fs *flag.FlagSet) error {
+	if fs.NArg() == 0 {
 		return nil
 	}
-	if value := os.Getenv(c.Database.PasswordEnv); value != "" {
-		return nil
-	}
+	return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+}
 
-	secretPath := configPath + ".secrets"
-	secrets, err := os.ReadFile(secretPath)
-	if err == nil {
-		for _, line := range strings.Split(string(secrets), "\n") {
-			key, value, ok := strings.Cut(line, "=")
-			if ok && strings.TrimSpace(key) == c.Database.PasswordEnv && value != "" {
-				if err := os.Setenv(c.Database.PasswordEnv, value); err != nil {
-					return err
-				}
-				return nil
+func ensureDatabasePassword(c config.Config, configPath string, out io.Writer) error {
+	return ensureConfigSecrets(c, configPath, out)
+}
+
+// requiredConfigSecrets maps environment-variable names to whether poorman may
+// safely generate a value. Replica credentials must come from the primary;
+// inventing a different value would produce a valid-looking config that can
+// never authenticate.
+func requiredConfigSecrets(c config.Config) map[string]bool {
+	required := map[string]bool{}
+	add := func(name string, mayGenerate bool) {
+		if name == "" {
+			return
+		}
+		if existing, ok := required[name]; ok {
+			// If any consumer requires a shared value from the primary,
+			// generating it would silently break replica authentication.
+			required[name] = existing && mayGenerate
+			return
+		}
+		required[name] = mayGenerate
+	}
+	replica := c.Database != nil && c.Database.Role == "replica"
+	if c.Database != nil {
+		if !replica {
+			add(c.Database.PasswordEnv, true)
+		}
+		if c.Database.Role != "" && c.Database.Role != "standalone" && c.Database.Replication.PasswordEnv != "" {
+			add(c.Database.Replication.PasswordEnv, c.Database.Role == "primary")
+		}
+	}
+	if !replica {
+		for _, site := range c.Sites {
+			if site.WordPress != nil {
+				add(site.WordPress.AdminPassEnv, true)
 			}
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read secrets file: %w", err)
 	}
+	return required
+}
 
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return fmt.Errorf("generate database password: %w", err)
+func ensureConfigSecrets(c config.Config, configPath string, out io.Writer) error {
+	required := requiredConfigSecrets(c)
+	if len(required) == 0 {
+		return nil
 	}
-	value := base64.RawURLEncoding.EncodeToString(raw)
-	if err := os.Setenv(c.Database.PasswordEnv, value); err != nil {
+	secretPath := configPath + ".secrets"
+	values, err := readSecretValues(secretPath)
+	if err != nil {
 		return err
 	}
+	// Load persisted values first, then reject missing shared replica secrets
+	// before generating anything else. A failed apply must not leave behind a
+	// partially initialized set of credentials.
+	for name := range required {
+		if os.Getenv(name) == "" && values[name] != "" {
+			if err := os.Setenv(name, values[name]); err != nil {
+				return err
+			}
+		}
+	}
+	for name, mayGenerate := range required {
+		if os.Getenv(name) == "" && !mayGenerate {
+			return fmt.Errorf("replica requires %s from the primary; export it or copy it into %s", name, secretPath)
+		}
+	}
+	generated := false
+	for name, mayGenerate := range required {
+		if value := os.Getenv(name); value != "" {
+			continue
+		}
+		if !mayGenerate {
+			continue
+		}
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			return fmt.Errorf("generate password for %s: %w", name, err)
+		}
+		value := base64.RawURLEncoding.EncodeToString(raw)
+		values[name] = value
+		if err := os.Setenv(name, value); err != nil {
+			return err
+		}
+		generated = true
+	}
+	if generated {
+		if err := writeSecretValues(secretPath, values); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Generated and saved required passwords to %s\n", secretPath)
+	}
+	return nil
+}
 
-	content := strings.TrimRight(string(secrets), "\n")
-	if content != "" {
-		content += "\n"
+func copyConfigSecrets(sourceConfigPath, destinationConfigPath string, c config.Config) error {
+	source, err := readSecretValues(sourceConfigPath + ".secrets")
+	if err != nil {
+		return err
 	}
-	content += c.Database.PasswordEnv + "=" + value + "\n"
-	if err := os.WriteFile(secretPath, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("write secrets file %s: %w", secretPath, err)
+	destinationPath := destinationConfigPath + ".secrets"
+	destination, err := readSecretValues(destinationPath)
+	if err != nil {
+		return err
 	}
-	_ = os.Chmod(secretPath, 0o600)
-	fmt.Fprintf(out, "Generated and saved database password to %s\n", secretPath)
+	changed := false
+	for name := range requiredConfigSecrets(c) {
+		value := source[name]
+		if value == "" {
+			value = os.Getenv(name)
+		}
+		if value != "" && destination[name] == "" {
+			destination[name] = value
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return writeSecretValues(destinationPath, destination)
+}
+
+func readSecretValues(path string) (map[string]string, error) {
+	values := map[string]string{}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return values, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read secrets file %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(name) != "" && value != "" {
+			values[strings.TrimSpace(name)] = value
+		}
+	}
+	return values, nil
+}
+
+func writeSecretValues(path string, values map[string]string) error {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var content strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&content, "%s=%s\n", name, values[name])
+	}
+	if err := os.WriteFile(path, []byte(content.String()), 0o600); err != nil {
+		return fmt.Errorf("write secrets file %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("secure secrets file %s: %w", path, err)
+	}
 	return nil
 }
 
