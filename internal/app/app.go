@@ -20,9 +20,13 @@ import (
 	"github.com/chokunplayz/poormanwebctrl/internal/provider"
 )
 
-const version = "1.0.0-dev"
+var version = "1.0.0-dev"
 
 func Run(args []string, in io.Reader, out, errOut io.Writer) error {
+	return RunContext(context.Background(), args, in, out, errOut)
+}
+
+func RunContext(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	if len(args) == 0 {
 		usage(out)
 		return nil
@@ -33,15 +37,15 @@ func Run(args []string, in io.Reader, out, errOut io.Writer) error {
 	case "plan":
 		return planCommand(args[1:], out)
 	case "apply":
-		return applyCommand(args[1:], in, out, errOut)
+		return applyCommand(ctx, args[1:], in, out, errOut)
 	case "tui":
-		return tuiCommand(args[1:], in, out)
+		return tuiCommand(ctx, args[1:], in, out)
 	case "status":
-		return statusCommand(args[1:], out)
+		return statusCommand(ctx, args[1:], out)
 	case "replica":
-		return replicaCommand(args[1:], in, out, errOut)
+		return replicaCommand(ctx, args[1:], in, out, errOut)
 	case "backup":
-		return backupCommand(args[1:], in, out, errOut)
+		return backupCommand(ctx, args[1:], in, out, errOut)
 	case "version", "--version", "-v":
 		fmt.Fprintln(out, version)
 		return nil
@@ -69,7 +73,7 @@ Usage:
 Start with "poorman init", edit the file, then preview with "poorman plan".`)
 }
 
-func statusCommand(args []string, out io.Writer) error {
+func statusCommand(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("f", "poorman.json", "configuration file")
@@ -84,10 +88,10 @@ func statusCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return health.Report(context.Background(), c, p, out)
+	return health.Report(ctx, c, p, out)
 }
 
-func replicaCommand(args []string, in io.Reader, out, errOut io.Writer) error {
+func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("replica requires status or promote")
 	}
@@ -127,10 +131,10 @@ func replicaCommand(args []string, in io.Reader, out, errOut io.Writer) error {
 			return nil
 		}
 	}
-	return executor.Apply(context.Background(), operation, in, out, errOut)
+	return executor.Apply(ctx, operation, in, out, errOut)
 }
 
-func backupCommand(args []string, in io.Reader, out, errOut io.Writer) error {
+func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	yes := fs.Bool("yes", false, "skip confirmation")
@@ -147,10 +151,10 @@ func backupCommand(args []string, in io.Reader, out, errOut io.Writer) error {
 			return nil
 		}
 	}
-	return executor.Apply(context.Background(), operation, in, out, errOut)
+	return executor.Apply(ctx, operation, in, out, errOut)
 }
 
-func tuiCommand(args []string, in io.Reader, out io.Writer) error {
+func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("f", "poorman.json", "configuration file")
@@ -159,7 +163,7 @@ func tuiCommand(args []string, in io.Reader, out io.Writer) error {
 	}
 	ui := newTerminalUI(out)
 	if _, err := os.Stat(*path); err == nil {
-		return tuiDashboard(*path, in, ui)
+		return tuiDashboard(ctx, *path, in, ui)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -183,10 +187,11 @@ func tuiCommand(args []string, in io.Reader, out io.Writer) error {
 	dbChoice := prompt(reader, ui, "Database (mariadb/postgresql/none)", "mariadb")
 	var database *config.Database
 	if dbChoice != "none" {
-		database = &config.Database{Provider: dbChoice, Role: "standalone", Name: prompt(reader, ui, "Database name", "website"), User: prompt(reader, ui, "Database user", "website"), PasswordEnv: "POORMAN_DB_PASSWORD"}
+		database = &config.Database{Provider: dbChoice, Role: strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", "standalone")), Name: prompt(reader, ui, "Database name", "website"), User: prompt(reader, ui, "Database user", "website"), PasswordEnv: "POORMAN_DB_PASSWORD"}
+		configureReplication(reader, ui, database)
 	}
 	var wordpress *config.WordPress
-	if runtimeName == "php" && database != nil && strings.EqualFold(prompt(reader, ui, "Install WordPress? (y/N)", "n"), "y") {
+	if runtimeName == "php" && database != nil && database.Role != "replica" && strings.EqualFold(prompt(reader, ui, "Install WordPress? (y/N)", "n"), "y") {
 		wordpress = &config.WordPress{Title: domain, AdminUser: "admin", AdminEmail: prompt(reader, ui, "WordPress admin email", "admin@"+domain), AdminPassEnv: "POORMAN_WP_ADMIN_PASSWORD"}
 	}
 	tlsEnabled := strings.EqualFold(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", "y"), "y")
@@ -210,13 +215,46 @@ func tuiCommand(args []string, in io.Reader, out io.Writer) error {
 	return nil
 }
 
-func tuiDashboard(path string, in io.Reader, ui *terminalUI) error {
+func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config.Database) {
+	if database.Role == "standalone" {
+		return
+	}
+	database.Replication.User = prompt(reader, ui, "Replication user", defaultValue(database.Replication.User, "replicator"))
+	database.Replication.PasswordEnv = prompt(reader, ui, "Replication password environment variable", defaultValue(database.Replication.PasswordEnv, "POORMAN_REPLICATION_PASSWORD"))
+	if database.Role == "primary" {
+		database.Replication.AllowedCIDR = prompt(reader, ui, "Replica allowed CIDR", defaultValue(database.Replication.AllowedCIDR, "10.20.0.0/24"))
+		if database.Provider == "postgresql" {
+			database.Replication.Slot = prompt(reader, ui, "PostgreSQL replication slot", defaultValue(database.Replication.Slot, "poorman_replica_1"))
+		}
+		return
+	}
+	if database.Role == "replica" {
+		database.Replication.PrimaryHost = prompt(reader, ui, "Primary database host", defaultValue(database.Replication.PrimaryHost, "10.20.0.10"))
+		if database.Provider == "postgresql" {
+			database.Replication.Slot = prompt(reader, ui, "PostgreSQL replication slot", defaultValue(database.Replication.Slot, "poorman_replica_1"))
+			database.DataDir = prompt(reader, ui, "PostgreSQL data directory", defaultValue(database.DataDir, "/var/lib/postgresql/18/main"))
+		} else {
+			nodeDefault := "2"
+			if database.Replication.NodeID > 0 {
+				nodeDefault = strconv.Itoa(database.Replication.NodeID)
+			}
+			nodeID := prompt(reader, ui, "MariaDB replica node ID", nodeDefault)
+			database.Replication.NodeID, _ = strconv.Atoi(nodeID)
+		}
+	}
+}
+
+func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
 	c, err := config.Load(path)
 	if err != nil {
 		return err
 	}
 	reader := bufio.NewReader(in)
 	for {
+		c, err = config.Load(path)
+		if err != nil {
+			return err
+		}
 		ui.clear()
 		ui.dashboard(c, path)
 		switch prompt(reader, ui, "Select action", "1") {
@@ -225,28 +263,36 @@ func tuiDashboard(path string, in io.Reader, ui *terminalUI) error {
 				return err
 			}
 		case "2":
-			if err := applyCommand([]string{"-f", path}, reader, ui, ui); err != nil {
+			if err := applyCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
 				return err
 			}
 		case "3":
-			if err := statusCommand([]string{"-f", path}, ui); err != nil {
+			if err := statusCommand(ctx, []string{"-f", path}, ui); err != nil {
 				ui.warn("Health warning: " + err.Error())
 			}
 		case "4":
-			if err := backupCommand(nil, reader, ui, ui); err != nil {
+			if err := backupCommand(ctx, nil, reader, ui, ui); err != nil {
 				return err
 			}
 		case "5":
-			if err := replicaCommand([]string{"status", "-f", path}, reader, ui, ui); err != nil {
+			if err := replicaCommand(ctx, []string{"status", "-f", path}, reader, ui, ui); err != nil {
 				ui.warn("Replication status unavailable: " + err.Error())
 			}
 		case "6":
-			if err := firewallTUI(path, reader, ui); err != nil {
+			if err := firewallTUI(ctx, path, reader, ui); err != nil {
 				ui.warn("Firewall operation unavailable: " + err.Error())
 			}
 		case "7":
-			if err := operationsTUI(c, reader, ui); err != nil {
+			if err := operationsTUI(ctx, c, reader, ui); err != nil {
 				ui.warn("Operations unavailable: " + err.Error())
+			}
+		case "8":
+			if err := vhostsTUI(path, reader, ui); err != nil {
+				ui.warn("Virtual host management unavailable: " + err.Error())
+			}
+		case "9":
+			if err := stackSettingsTUI(path, reader, ui); err != nil {
+				ui.warn("Stack settings unavailable: " + err.Error())
 			}
 		case "0", "q", "Q":
 			return nil
@@ -256,7 +302,225 @@ func tuiDashboard(path string, in io.Reader, ui *terminalUI) error {
 	}
 }
 
-func operationsTUI(c config.Config, reader *bufio.Reader, ui *terminalUI) error {
+func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		ui.clear()
+		ui.brand("Stack settings", "Adjust the platform after initial setup")
+		ui.panel("CURRENT", fmt.Sprintf("web       %s\ndatabase  %s\ntls       %s\nfirewall  %s\nbackups   %s", c.WebServer.Provider, databaseLabel(c), enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled)))
+		ui.panel("ACTIONS", "1  web server\n2  database and replication\n3  TLS and certificate email\n4  firewall\n5  backups\n0  back")
+		switch prompt(reader, ui, "Select action", "1") {
+		case "1":
+			c.WebServer.Provider = strings.ToLower(prompt(reader, ui, "Web server (nginx/apache/openlitespeed)", c.WebServer.Provider))
+		case "2":
+			if err := adjustDatabase(&c, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+		case "3":
+			c.TLS.Enabled = yesNo(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", enabledDefault(c.TLS.Enabled)))
+			if c.TLS.Enabled {
+				c.TLS.Email = prompt(reader, ui, "Certificate email", c.TLS.Email)
+			}
+		case "4":
+			c.Firewall.Enabled = yesNo(prompt(reader, ui, "Enable firewall? (Y/n)", enabledDefault(c.Firewall.Enabled)))
+		case "5":
+			c.Backups.Enabled = yesNo(prompt(reader, ui, "Enable nightly backups? (Y/n)", enabledDefault(c.Backups.Enabled)))
+			if c.Backups.Enabled {
+				c.Backups.Destination = prompt(reader, ui, "Backup destination", c.Backups.Destination)
+				c.Backups.Schedule = prompt(reader, ui, "Backup schedule", c.Backups.Schedule)
+			}
+		case "0", "q", "Q":
+			return nil
+		default:
+			ui.warn("Unknown selection.")
+			continue
+		}
+		if err := config.Write(path, c); err != nil {
+			ui.warn(err.Error())
+			pause(reader, ui)
+			continue
+		}
+		ui.success("Stack settings updated")
+	}
+}
+
+func adjustDatabase(c *config.Config, reader *bufio.Reader, ui *terminalUI) error {
+	currentProvider, currentRole := "mariadb", "standalone"
+	name, user, passwordEnv := "website", "website", "POORMAN_DB_PASSWORD"
+	if c.Database != nil {
+		currentProvider, currentRole = c.Database.Provider, c.Database.Role
+		name, user, passwordEnv = c.Database.Name, c.Database.User, c.Database.PasswordEnv
+	}
+	providerName := strings.ToLower(prompt(reader, ui, "Database (mariadb/postgresql/none)", currentProvider))
+	if providerName == "none" {
+		c.Database = nil
+		return nil
+	}
+	database := &config.Database{Provider: providerName, Role: strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", currentRole)), Name: prompt(reader, ui, "Database name", name), User: prompt(reader, ui, "Database user", user), PasswordEnv: prompt(reader, ui, "Database password environment variable", passwordEnv)}
+	configureReplication(reader, ui, database)
+	c.Database = database
+	return nil
+}
+
+func databaseLabel(c config.Config) string {
+	if c.Database == nil {
+		return "none"
+	}
+	return c.Database.Provider + " (" + c.Database.Role + ")"
+}
+
+func enabledDefault(enabled bool) string {
+	if enabled {
+		return "y"
+	}
+	return "n"
+}
+
+func yesNo(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "y")
+}
+
+func vhostsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		ui.clear()
+		ui.brand("Virtual hosts", "Manage multiple domains served by this machine")
+		if len(c.Sites) == 0 {
+			ui.muted("No virtual hosts configured.")
+		} else {
+			for i, site := range c.Sites {
+				aliases := ""
+				if len(site.Aliases) > 0 {
+					aliases = "  aliases: " + strings.Join(site.Aliases, ", ")
+				}
+				fmt.Fprintf(ui, "%d  %-30s %-6s %s%s\n", i+1, site.Domain, defaultValue(site.Runtime, "static"), site.Root, aliases)
+			}
+		}
+		ui.panel("ACTIONS", "1  add virtual host\n2  edit virtual host\n3  remove virtual host\n0  back")
+		switch prompt(reader, ui, "Select action", "1") {
+		case "1":
+			if err := addVHost(path, c, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "2":
+			if err := editVHost(path, c, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "3":
+			if err := removeVHost(path, c, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "0", "q", "Q":
+			return nil
+		default:
+			ui.warn("Unknown selection.")
+		}
+	}
+}
+
+func addVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
+	domain := prompt(reader, ui, "Domain", "example.com")
+	site := config.Site{
+		Domain:  domain,
+		Root:    prompt(reader, ui, "Document root", "/var/www/"+domain),
+		Owner:   prompt(reader, ui, "System/SFTP user", firstUser(c)),
+		Runtime: prompt(reader, ui, "Runtime (static/php)", "static"),
+	}
+	site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", ""))
+	c.Sites = append(c.Sites, site)
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Added virtual host " + site.Domain)
+	return nil
+}
+
+func editVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
+	i, err := chooseVHost(c, reader, ui)
+	if err != nil {
+		return err
+	}
+	site := c.Sites[i]
+	site.Domain = prompt(reader, ui, "Domain", site.Domain)
+	site.Root = prompt(reader, ui, "Document root", site.Root)
+	site.Owner = prompt(reader, ui, "System/SFTP user", site.Owner)
+	site.Runtime = prompt(reader, ui, "Runtime (static/php)", defaultValue(site.Runtime, "static"))
+	site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", strings.Join(site.Aliases, ",")))
+	c.Sites[i] = site
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Updated virtual host " + site.Domain)
+	return nil
+}
+
+func removeVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
+	i, err := chooseVHost(c, reader, ui)
+	if err != nil {
+		return err
+	}
+	site := c.Sites[i]
+	if strings.ToLower(prompt(reader, ui, "Remove "+site.Domain+"? (y/N)", "n")) != "y" {
+		ui.muted("Cancelled.")
+		return nil
+	}
+	c.Sites = append(c.Sites[:i], c.Sites[i+1:]...)
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Removed virtual host " + site.Domain)
+	return nil
+}
+
+func chooseVHost(c config.Config, reader *bufio.Reader, ui *terminalUI) (int, error) {
+	if len(c.Sites) == 0 {
+		return 0, fmt.Errorf("no virtual hosts configured")
+	}
+	choice := prompt(reader, ui, "Virtual host number", "1")
+	n, err := parseChoice(choice, len(c.Sites))
+	if err != nil {
+		return 0, fmt.Errorf("invalid virtual host number")
+	}
+	return n - 1, nil
+}
+
+func firstUser(c config.Config) string {
+	if len(c.Access.Users) > 0 {
+		return c.Access.Users[0].Name
+	}
+	return ""
+}
+
+func defaultValue(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func parseAliases(value string) []string {
+	var aliases []string
+	for _, alias := range strings.Split(value, ",") {
+		alias = strings.TrimSpace(alias)
+		if alias != "" {
+			aliases = append(aliases, alias)
+		}
+	}
+	return aliases
+}
+
+func operationsTUI(ctx context.Context, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
 	services := configuredServices(c)
 	for {
 		ui.clear()
@@ -267,7 +531,7 @@ func operationsTUI(c config.Config, reader *bufio.Reader, ui *terminalUI) error 
 		case "1":
 			ui.clear()
 			ui.brand("Host resource stats", "A point-in-time view of capacity and service failures")
-			if err := ops.Stats(context.Background(), ui); err != nil {
+			if err := ops.Stats(ctx, ui); err != nil {
 				ui.warn(err.Error())
 			}
 			pause(reader, ui)
@@ -297,7 +561,7 @@ func operationsTUI(c config.Config, reader *bufio.Reader, ui *terminalUI) error 
 			if n, err := parsePositive(lineCount); err == nil {
 				lines = n
 			}
-			if err := ops.Logs(context.Background(), service, lines, ui); err != nil {
+			if err := ops.Logs(ctx, service, lines, ui); err != nil {
 				ui.warn(err.Error())
 			}
 			pause(reader, ui)
@@ -305,7 +569,7 @@ func operationsTUI(c config.Config, reader *bufio.Reader, ui *terminalUI) error 
 			ui.clear()
 			ui.brand("Backup inventory", "Review artifacts produced by the configured backup job")
 			ui.muted("Destination: " + c.Backups.Destination)
-			if err := ops.BackupFiles(context.Background(), c.Backups.Destination, ui); err != nil {
+			if err := ops.BackupFiles(ctx, c.Backups.Destination, ui); err != nil {
 				ui.warn(err.Error())
 			}
 			pause(reader, ui)
@@ -359,7 +623,7 @@ func pause(reader *bufio.Reader, ui *terminalUI) {
 	prompt(reader, ui, "Press enter to continue", "")
 }
 
-func firewallTUI(path string, in io.Reader, ui *terminalUI) error {
+func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
 	c, err := config.Load(path)
 	if err != nil {
 		return err
@@ -381,7 +645,7 @@ func firewallTUI(path string, in io.Reader, ui *terminalUI) error {
 				return err
 			}
 			operation.Print(ui)
-			if err := executor.Apply(context.Background(), operation, reader, ui, ui); err != nil {
+			if err := executor.Apply(ctx, operation, reader, ui, ui); err != nil {
 				ui.warn("Status check failed: " + err.Error())
 			}
 		case "2":
@@ -402,7 +666,7 @@ func firewallTUI(path string, in io.Reader, ui *terminalUI) error {
 				ui.muted("Cancelled.")
 				break
 			}
-			if err := executor.Apply(context.Background(), operation, reader, ui, ui); err != nil {
+			if err := executor.Apply(ctx, operation, reader, ui, ui); err != nil {
 				return err
 			}
 		case "4":
@@ -417,7 +681,7 @@ func firewallTUI(path string, in io.Reader, ui *terminalUI) error {
 				ui.muted("Cancelled.")
 				break
 			}
-			if err := executor.Apply(context.Background(), operation, reader, ui, ui); err != nil {
+			if err := executor.Apply(ctx, operation, reader, ui, ui); err != nil {
 				return err
 			}
 		case "0", "q", "Q":
@@ -494,7 +758,7 @@ func (ui *terminalUI) dashboard(c config.Config, path string) {
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s (%s)\nsite      %s\nconfig    %s", c.WebServer.Provider, db, role, site, path))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
-	ui.panel("ACTIONS", "1  preview plan          5  replication status\n2  apply configuration    6  Firewall management\n3  health status           7  long-term operations\n4  run backup\n0  exit")
+	ui.panel("ACTIONS", "1  preview plan          5  replication status\n2  apply configuration    6  Firewall management\n3  health status           7  long-term operations\n4  run backup              8  Virtual hosts\n9  Stack settings\n0  exit")
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
 }
 
@@ -574,7 +838,7 @@ func planCommand(args []string, out io.Writer) error {
 	return nil
 }
 
-func applyCommand(args []string, in io.Reader, out, errOut io.Writer) error {
+func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("f", "poorman.json", "configuration file")
@@ -603,5 +867,5 @@ func applyCommand(args []string, in io.Reader, out, errOut io.Writer) error {
 			return nil
 		}
 	}
-	return executor.Apply(context.Background(), p, in, out, errOut)
+	return executor.Apply(ctx, p, in, out, errOut)
 }

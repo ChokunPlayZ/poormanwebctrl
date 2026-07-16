@@ -6,6 +6,7 @@
 
 - Nginx, Apache, or OpenLiteSpeed package/service setup
 - Static and PHP virtual hosts
+- Multiple virtual hosts with aliases, plus guided add/edit/remove management
 - PostgreSQL or MariaDB databases and application users
 - PostgreSQL streaming-replica and MariaDB GTID primary/replica plans
 - Replication status and guarded replica promotion
@@ -27,7 +28,19 @@ go build -o bin/poorman ./cmd/poorman
 ./bin/poorman plan
 ```
 
+### Install or update
+
+Install the latest release (rerunning the same command updates it):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ChokunPlayZ/poormanwebctrl/main/install.sh | sh
+```
+
+The installer places `poorman` in `~/.local/bin`. Set `POORMAN_INSTALL_DIR` to choose another location, or `POORMAN_VERSION` to install a specific release.
+
 Provisioning is Linux-only. Ubuntu/Debian, RHEL-family Linux, and Alpine are modeled. Development and tests work on macOS.
+
+Press `Ctrl-C` to stop an in-progress operation safely. Completed steps are kept, the active command is canceled, and remaining steps are not started; rerun `apply` to continue from the idempotent plan.
 
 ## Main commands
 
@@ -43,6 +56,12 @@ poorman replica promote [-f FILE]   promote a configured replica
 ```
 
 When a configuration already exists, `poorman tui` opens the operations dashboard. Choose **long-term operations** for read-only host capacity, recent systemd journal logs for configured services, and the files currently present in the configured backup destination.
+
+Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains. Every host is planned independently, including its document root, aliases, runtime, WordPress setup, and managed server configuration.
+
+Choose **Stack settings** to adjust the web server, database and replication role, TLS email/enabled state, firewall, and backup destination/schedule after setup.
+
+During a new guided setup, the database section now asks for `standalone`, `primary`, or `replica`. Primary setup collects the replication network and credentials; replica setup collects the primary host, replication credentials, and the PostgreSQL data directory or MariaDB node ID.
 
 ## Secrets
 

@@ -153,9 +153,28 @@ func (c Config) Validate() error {
 	if c.Access.FTP.Enabled && !c.Access.FTP.AllowPlaintext {
 		return fmt.Errorf("FTP is plaintext; set access.ftp.allow_plaintext=true to explicitly accept the risk, or use SFTP")
 	}
+	seenSites := map[string]string{}
 	for i, s := range c.Sites {
 		if !validDomain(s.Domain) || !safeManagedPath(s.Root) {
 			return fmt.Errorf("site %d requires a valid domain and absolute root", i+1)
+		}
+		domainKey := strings.ToLower(s.Domain)
+		if owner, ok := seenSites[domainKey]; ok {
+			return fmt.Errorf("site domain %q conflicts with %q", s.Domain, owner)
+		}
+		seenSites[domainKey] = s.Domain
+		for _, alias := range s.Aliases {
+			if !validDomain(alias) {
+				return fmt.Errorf("site %q has invalid alias %q", s.Domain, alias)
+			}
+			if strings.EqualFold(alias, s.Domain) {
+				return fmt.Errorf("site %q cannot use its domain as an alias", s.Domain)
+			}
+			aliasKey := strings.ToLower(alias)
+			if owner, ok := seenSites[aliasKey]; ok {
+				return fmt.Errorf("site alias %q conflicts with %q", alias, owner)
+			}
+			seenSites[aliasKey] = s.Domain
 		}
 		if s.Owner != "" && !users[s.Owner] {
 			return fmt.Errorf("site %q references unknown owner %q", s.Domain, s.Owner)

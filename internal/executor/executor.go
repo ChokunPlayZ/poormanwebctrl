@@ -16,6 +16,9 @@ import (
 
 func Apply(ctx context.Context, p plan.Plan, in io.Reader, out, errOut io.Writer) error {
 	for i, step := range p.Steps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		fmt.Fprintf(out, "[%d/%d] %s\n", i+1, len(p.Steps), step.Description)
 		var err error
 		switch step.Kind {
@@ -118,7 +121,11 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 		}
 		cmd.Stdin = bytes.NewBufferString(resolved)
 	} else {
-		cmd.Stdin = in
+		// Provisioning commands must not inherit the TUI's input stream. A key
+		// pressed while a step is running would otherwise be consumed by the
+		// command and make the workflow advance unexpectedly.
+		// Steps that need input declare it explicitly through Input.
+		cmd.Stdin = nil
 	}
 	return cmd.Run()
 }
