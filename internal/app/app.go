@@ -975,6 +975,11 @@ func inputReader(in io.Reader) *bufio.Reader {
 // so it cannot be interpreted as that prompt's default action.
 func discardBlankInput(reader *bufio.Reader) {
 	for {
+		// Peek blocks when the terminal has no queued input. Only inspect
+		// bytes that the reader already buffered while the command was running.
+		if reader.Buffered() == 0 {
+			return
+		}
 		line, err := reader.Peek(1)
 		if err != nil || line[0] != '\n' {
 			return

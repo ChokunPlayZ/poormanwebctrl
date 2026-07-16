@@ -17,21 +17,22 @@ const (
 )
 
 type Step struct {
-	Description   string
-	Kind          Kind
-	Command       string
-	Args          []string
-	Input         string
-	Path          string
-	Content       string
-	Mode          uint32
-	Owner         string
-	RunAs         string
-	NeedsRoot     bool
-	Sensitive     bool
-	SQLSecrets    bool
-	UnlessCommand string
-	UnlessArgs    []string
+	Description    string
+	Kind           Kind
+	Command        string
+	Args           []string
+	Input          string
+	Path           string
+	Content        string
+	Mode           uint32
+	Owner          string
+	RunAs          string
+	NeedsRoot      bool
+	Sensitive      bool
+	SQLSecrets     bool
+	TimeoutSeconds int
+	UnlessCommand  string
+	UnlessArgs     []string
 }
 
 type Plan struct {

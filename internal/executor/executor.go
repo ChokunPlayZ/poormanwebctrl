@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 )
@@ -119,7 +120,16 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 		args = append(prefix, args...)
 		command = "sudo"
 	}
-	cmd := exec.CommandContext(ctx, command, args...)
+	if s.Command == "mariadb" && s.Input != "" {
+		fmt.Fprintln(out, "  applying MariaDB SQL (up to 60 seconds)...")
+	}
+	commandContext := ctx
+	var cancel context.CancelFunc
+	if s.TimeoutSeconds > 0 {
+		commandContext, cancel = context.WithTimeout(ctx, time.Duration(s.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(commandContext, command, args...)
 	cmd.Stdout, cmd.Stderr = out, errOut
 	if s.Input != "" {
 		resolved, err := resolveEnv(s.Input, s.SQLSecrets)
