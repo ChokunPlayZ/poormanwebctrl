@@ -145,6 +145,29 @@ func TestGuidedReplicaSetupSupportsSameMachine(t *testing.T) {
 	}
 }
 
+func TestTUIReplicaSetupKeepsDashboardInputFlow(t *testing.T) {
+	primaryPath := filepath.Join(t.TempDir(), "primary.json")
+	replicaPath := filepath.Join(t.TempDir(), "replica.json")
+	if err := config.WriteDefault(primaryPath); err != nil {
+		t.Fatal(err)
+	}
+	input := "10\n" + replicaPath + "\npostgresql\n\n\nn\n\n\n\n\nn\nn\n0\n"
+	var out bytes.Buffer
+	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(replicaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database == nil || c.Database.Role != "replica" {
+		t.Fatalf("database = %#v, want replica configuration", c.Database)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Replica configuration is ready")) {
+		t.Fatal("TUI did not return to the replica setup handoff")
+	}
+}
+
 func TestTUIAdjustsStackSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := config.WriteDefault(path); err != nil {

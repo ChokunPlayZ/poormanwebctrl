@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -305,7 +306,7 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		}
 	}
 	ui := newTerminalUI(out)
-	reader := bufio.NewReader(in)
+	reader := inputReader(in)
 	ui.brand("guided replica setup", "Attach a database replica with safe same-machine defaults")
 	providerName := "mariadb"
 	if c.Database != nil {
@@ -341,8 +342,8 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 			return err
 		}
 		ui.clear()
-		ui.dashboard(c, path)
-		switch prompt(reader, ui, "Select action", "1") {
+		choice := dashboardChoice(in, reader, ui, c, path)
+		switch choice {
 		case "1":
 			if err := planCommand([]string{"-f", path}, ui); err != nil {
 				return err
@@ -407,7 +408,9 @@ func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufi
 		}
 	}
 	if strings.EqualFold(prompt(reader, ui, "Apply the replica configuration now? (y/N)", "n"), "y") {
-		return applyCommand(ctx, []string{"-f", replicaPath}, reader, ui, ui)
+		// The guided prompt is already the user's confirmation. Passing --yes
+		// avoids asking for a second confirmation and consuming the next TUI input.
+		return applyCommand(ctx, []string{"-f", replicaPath, "--yes"}, reader, ui, ui)
 	}
 	ui.muted(fmt.Sprintf("Replica configuration is ready: poorman apply -f %s", replicaPath))
 	return nil
@@ -854,6 +857,10 @@ func (ui *terminalUI) panel(title, body string) {
 }
 
 func (ui *terminalUI) dashboard(c config.Config, path string) {
+	ui.dashboardSelected(c, path, 1)
+}
+
+func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected int) {
 	ui.brand("operations", "A calm control surface for your self-hosted stack")
 	db := "none"
 	role := "—"
@@ -869,8 +876,104 @@ func (ui *terminalUI) dashboard(c config.Config, path string) {
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s (%s)\nsite      %s\nconfig    %s", c.WebServer.Provider, db, role, site, path))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
-	ui.panel("ACTIONS", "1  preview plan          5  replication status\n2  apply configuration    6  Firewall management\n3  health status           7  long-term operations\n4  run backup              8  Virtual hosts\n9  Stack settings         10 guided replica setup\n0  exit")
+	ui.panel("ACTIONS", dashboardActionLine(1, 5, selected, "preview plan", "replication status")+"\n"+
+		dashboardActionLine(2, 6, selected, "apply configuration", "Firewall management")+"\n"+
+		dashboardActionLine(3, 7, selected, "health status", "long-term operations")+"\n"+
+		dashboardActionLine(4, 8, selected, "run backup", "Virtual hosts")+"\n"+
+		dashboardActionLine(9, 10, selected, "Stack settings", "guided replica setup")+"\n"+dashboardActionLine(0, -1, selected, "exit", ""))
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
+}
+
+func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string) string {
+	marker := "  "
+	if selected == left || selected == right {
+		marker = "> "
+	}
+	if right < 0 {
+		return fmt.Sprintf("%s%-2d  %s", marker, left, leftLabel)
+	}
+	return fmt.Sprintf("%s%-2d  %-22s%-2d  %s", marker, left, leftLabel, right, rightLabel)
+}
+
+func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
+	file, ok := in.(*os.File)
+	if !ok || !isTerminal(file) {
+		ui.dashboard(c, path)
+		return prompt(reader, ui, "Select action", "1")
+	}
+
+	return rawDashboardChoice(file, ui, c, path)
+}
+
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path string) string {
+	getState := exec.Command("stty", "-g")
+	getState.Stdin = file
+	state, err := getState.Output()
+	if err != nil {
+		return "1"
+	}
+	defer func() {
+		restore := exec.Command("stty", strings.TrimSpace(string(state)))
+		restore.Stdin = file
+		_ = restore.Run()
+	}()
+	raw := exec.Command("stty", "-icanon", "-echo", "min", "1", "time", "0")
+	raw.Stdin = file
+	if err := raw.Run(); err != nil {
+		return "1"
+	}
+
+	selected := 1
+	typed := ""
+	ui.clear()
+	ui.dashboardSelected(c, path, selected)
+	for {
+		var b [1]byte
+		if _, err := file.Read(b[:]); err != nil {
+			return "1"
+		}
+		switch b[0] {
+		case '\r', '\n':
+			if typed != "" {
+				return typed
+			}
+			return strconv.Itoa(selected)
+		case 'q', 'Q':
+			return "q"
+		case 0x1b:
+			var sequence [2]byte
+			if _, err := io.ReadFull(file, sequence[:]); err != nil {
+				continue
+			}
+			switch sequence[1] {
+			case 'A':
+				selected--
+				if selected < 1 {
+					selected = 10
+				}
+			case 'B':
+				selected++
+				if selected > 10 {
+					selected = 1
+				}
+			default:
+				continue
+			}
+			ui.clear()
+			ui.dashboardSelected(c, path, selected)
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			typed += string(b[:])
+		case 8, 127:
+			if len(typed) > 0 {
+				typed = typed[:len(typed)-1]
+			}
+		}
+	}
 }
 
 func (ui *terminalUI) status(label string, good bool) string {
