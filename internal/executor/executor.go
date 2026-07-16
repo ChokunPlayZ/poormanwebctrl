@@ -109,7 +109,14 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 			command = "sudo"
 		}
 	} else if s.NeedsRoot && os.Geteuid() != 0 {
-		args = append([]string{command}, args...)
+		prefix := []string{command}
+		if s.Input != "" {
+			// Never let sudo prompt while stdin may contain command data (for
+			// example SQL). An authentication prompt would consume that data or
+			// appear to hang forever in the TUI.
+			prefix = append([]string{"-n"}, prefix...)
+		}
+		args = append(prefix, args...)
 		command = "sudo"
 	}
 	cmd := exec.CommandContext(ctx, command, args...)

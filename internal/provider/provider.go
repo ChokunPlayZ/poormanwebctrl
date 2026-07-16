@@ -347,7 +347,7 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 			pn.Add(step)
 		} else {
 			input := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;\nCREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'localhost' IDENTIFIED BY '${%s}';\nGRANT ALL ON `%s`.* TO '%s'@'localhost';\nFLUSH PRIVILEGES;\n", d.Name, d.User, d.PasswordEnv, d.User, d.PasswordEnv, d.Name, d.User)
-			step := plan.Cmd("Create MariaDB application database and user", "mariadb", true)
+			step := plan.Cmd("Create MariaDB application database and user", "mariadb", true, "--batch", "--skip-column-names", "--connect-timeout=10")
 			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 			pn.Add(step)
 		}
