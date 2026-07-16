@@ -885,14 +885,17 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 }
 
 func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string) string {
-	marker := "  "
-	if selected == left || selected == right {
-		marker = "> "
+	leftMarker, rightMarker := "  ", "  "
+	if selected == left {
+		leftMarker = "> "
+	}
+	if selected == right {
+		rightMarker = "> "
 	}
 	if right < 0 {
-		return fmt.Sprintf("%s%-2d  %s", marker, left, leftLabel)
+		return fmt.Sprintf("%s%-2d  %s", leftMarker, left, leftLabel)
 	}
-	return fmt.Sprintf("%s%-2d  %-22s%-2d  %s", marker, left, leftLabel, right, rightLabel)
+	return fmt.Sprintf("%s%-2d  %-22s%s%-2d  %s", leftMarker, left, leftLabel, rightMarker, right, rightLabel)
 }
 
 func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
@@ -953,13 +956,13 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 			switch sequence[1] {
 			case 'A':
 				selected--
-				if selected < 1 {
+				if selected < 0 {
 					selected = 10
 				}
 			case 'B':
 				selected++
 				if selected > 10 {
-					selected = 1
+					selected = 0
 				}
 			default:
 				continue
