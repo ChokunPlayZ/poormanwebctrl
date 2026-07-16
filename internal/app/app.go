@@ -380,7 +380,7 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 				ui.warn("Stack settings unavailable: " + err.Error())
 			}
 		case "10":
-			if err := guidedReplicaSetup([]string{"-f", path}, reader, ui); err != nil {
+			if err := guidedReplicaSetupTUI(ctx, path, reader, ui); err != nil {
 				ui.warn("Replica setup unavailable: " + err.Error())
 			}
 		case "0", "q", "Q":
@@ -389,6 +389,28 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 			ui.warn("Unknown selection.")
 		}
 	}
+}
+
+func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) error {
+	ui.clear()
+	ui.brand("guided replica setup", "Create a separate replica configuration from this stack")
+	replicaPath := prompt(reader, ui, "Replica configuration file", "replica.json")
+	if replicaPath == primaryPath {
+		return fmt.Errorf("replica configuration must be different from the primary configuration")
+	}
+	if err := guidedReplicaSetup([]string{"-f", replicaPath, "--from", primaryPath}, reader, ui); err != nil {
+		return err
+	}
+	if strings.EqualFold(prompt(reader, ui, "Preview the replica plan now? (Y/n)", "y"), "y") {
+		if err := planCommand([]string{"-f", replicaPath}, ui); err != nil {
+			return err
+		}
+	}
+	if strings.EqualFold(prompt(reader, ui, "Apply the replica configuration now? (y/N)", "n"), "y") {
+		return applyCommand(ctx, []string{"-f", replicaPath}, reader, ui, ui)
+	}
+	ui.muted(fmt.Sprintf("Replica configuration is ready: poorman apply -f %s", replicaPath))
+	return nil
 }
 
 func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
