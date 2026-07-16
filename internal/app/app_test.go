@@ -90,6 +90,25 @@ func TestTUIConfiguresPostgresReplica(t *testing.T) {
 	}
 }
 
+func TestGuidedReplicaSetupSupportsSameMachine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing.json")
+	if err := config.WriteDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	in := bytes.NewBufferString("postgresql\n\n\ny\n\n\n\n\n\n\n")
+	var out bytes.Buffer
+	if err := Run([]string{"replica", "setup", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database == nil || c.Database.Role != "replica" || c.Database.Port != 5433 || c.Database.Replication.PrimaryHost != "127.0.0.1" || c.Database.Replication.PrimaryPort != 5432 {
+		t.Fatalf("database = %#v, want same-machine PostgreSQL replica ports", c.Database)
+	}
+}
+
 func TestTUIAdjustsStackSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := config.WriteDefault(path); err != nil {

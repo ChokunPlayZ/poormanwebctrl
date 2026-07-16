@@ -43,6 +43,14 @@ func TestReplicationValidation(t *testing.T) {
 	}
 }
 
+func TestSameMachineReplicaPortsAreValid(t *testing.T) {
+	c := Default()
+	c.Database = &Database{Provider: "postgresql", Role: "replica", Port: 5433, DataDir: "/var/lib/postgresql/replica", Replication: Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 5432, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRejectsDangerousManagedRoots(t *testing.T) {
 	c := Default()
 	c.Sites[0].Root = "/"

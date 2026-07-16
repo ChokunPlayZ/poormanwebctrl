@@ -66,7 +66,7 @@ Usage:
   poorman apply [-f poorman.json] [--yes]
   poorman tui [-f poorman.json]
   poorman status [-f poorman.json]
-  poorman replica status|promote [-f poorman.json] [--yes]
+	poorman replica status|promote|setup [-f poorman.json] [--from primary.json]
   poorman backup [--yes]
   poorman version
 
@@ -96,6 +96,9 @@ func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOu
 		return fmt.Errorf("replica requires status or promote")
 	}
 	action := args[0]
+	if action == "setup" {
+		return guidedReplicaSetup(args[1:], in, out)
+	}
 	fs := flag.NewFlagSet("replica "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := fs.String("f", "poorman.json", "configuration file")
@@ -229,7 +232,22 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 		return
 	}
 	if database.Role == "replica" {
-		database.Replication.PrimaryHost = prompt(reader, ui, "Primary database host", defaultValue(database.Replication.PrimaryHost, "10.20.0.10"))
+		local := yesNo(prompt(reader, ui, "Is the primary on this machine? (y/N)", "n"))
+		primaryHostDefault := "10.20.0.10"
+		if local {
+			primaryHostDefault = "127.0.0.1"
+		}
+		database.Replication.PrimaryHost = prompt(reader, ui, "Primary database host", defaultValue(database.Replication.PrimaryHost, primaryHostDefault))
+		primaryPort := 5432
+		if database.Provider == "mariadb" {
+			primaryPort = 3306
+		}
+		database.Replication.PrimaryPort = promptPort(reader, ui, "Primary database port", database.Replication.PrimaryPort, primaryPort)
+		if local {
+			replicaPort := primaryPort + 1
+			database.Port = promptPort(reader, ui, "Replica database port", database.Port, replicaPort)
+			ui.muted("Same-machine replicas use separate ports so the primary and replica can run together.")
+		}
 		if database.Provider == "postgresql" {
 			database.Replication.Slot = prompt(reader, ui, "PostgreSQL replication slot", defaultValue(database.Replication.Slot, "poorman_replica_1"))
 			database.DataDir = prompt(reader, ui, "PostgreSQL data directory", defaultValue(database.DataDir, "/var/lib/postgresql/18/main"))
@@ -242,6 +260,65 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 			database.Replication.NodeID, _ = strconv.Atoi(nodeID)
 		}
 	}
+}
+
+func promptPort(reader *bufio.Reader, ui *terminalUI, label string, current, fallback int) int {
+	if current == 0 {
+		current = fallback
+	}
+	value, err := strconv.Atoi(prompt(reader, ui, label, strconv.Itoa(current)))
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("replica setup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	path := fs.String("f", "poorman.json", "configuration file")
+	from := fs.String("from", "", "existing primary or stack configuration to copy")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c := config.Default()
+	var err error
+	if _, statErr := os.Stat(*path); statErr == nil {
+		c, err = config.Load(*path)
+		if err != nil {
+			return err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	} else if *from != "" {
+		c, err = config.Load(*from)
+		if err != nil {
+			return err
+		}
+	}
+	ui := newTerminalUI(out)
+	reader := bufio.NewReader(in)
+	ui.brand("guided replica setup", "Attach a database replica with safe same-machine defaults")
+	providerName := "mariadb"
+	if c.Database != nil {
+		providerName = c.Database.Provider
+	}
+	providerName = strings.ToLower(prompt(reader, ui, "Database (mariadb/postgresql)", providerName))
+	database := &config.Database{Provider: providerName, Role: "replica", PasswordEnv: "POORMAN_DB_PASSWORD"}
+	if c.Database != nil {
+		copy := *c.Database
+		database = &copy
+		database.Provider = providerName
+		database.Role = "replica"
+	}
+	configureReplication(reader, ui, database)
+	c.Database = database
+	if err := config.Write(*path, c); err != nil {
+		return err
+	}
+	ui.success(fmt.Sprintf("Replica configuration saved to %s", *path))
+	ui.muted(fmt.Sprintf("Preview it with: poorman plan -f %s", *path))
+	return nil
 }
 
 func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
@@ -293,6 +370,10 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 		case "9":
 			if err := stackSettingsTUI(path, reader, ui); err != nil {
 				ui.warn("Stack settings unavailable: " + err.Error())
+			}
+		case "10":
+			if err := guidedReplicaSetup([]string{"-f", path}, reader, ui); err != nil {
+				ui.warn("Replica setup unavailable: " + err.Error())
 			}
 		case "0", "q", "Q":
 			return nil
@@ -758,7 +839,7 @@ func (ui *terminalUI) dashboard(c config.Config, path string) {
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s (%s)\nsite      %s\nconfig    %s", c.WebServer.Provider, db, role, site, path))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
-	ui.panel("ACTIONS", "1  preview plan          5  replication status\n2  apply configuration    6  Firewall management\n3  health status           7  long-term operations\n4  run backup              8  Virtual hosts\n9  Stack settings\n0  exit")
+	ui.panel("ACTIONS", "1  preview plan          5  replication status\n2  apply configuration    6  Firewall management\n3  health status           7  long-term operations\n4  run backup              8  Virtual hosts\n9  Stack settings         10 guided replica setup\n0  exit")
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
 }
 

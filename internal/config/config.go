@@ -32,11 +32,13 @@ type Database struct {
 	User        string      `json:"user,omitempty"`
 	PasswordEnv string      `json:"password_env,omitempty"`
 	DataDir     string      `json:"data_dir,omitempty"`
+	Port        int         `json:"port,omitempty"`
 	Replication Replication `json:"replication,omitempty"`
 }
 
 type Replication struct {
 	PrimaryHost string `json:"primary_host,omitempty"`
+	PrimaryPort int    `json:"primary_port,omitempty"`
 	User        string `json:"user,omitempty"`
 	PasswordEnv string `json:"password_env,omitempty"`
 	Slot        string `json:"slot,omitempty"`
@@ -216,11 +218,17 @@ func (c Config) Validate() error {
 		if d.PasswordEnv != "" && !envRE.MatchString(d.PasswordEnv) {
 			return fmt.Errorf("invalid database password environment variable")
 		}
+		if d.Port < 0 || d.Port > 65535 || (d.Port > 0 && d.Port < 1024) {
+			return fmt.Errorf("database port must be between 1024 and 65535")
+		}
 		if (d.Name != "" || d.User != "") && (d.Name == "" || d.User == "" || d.PasswordEnv == "") {
 			return fmt.Errorf("application database requires name, user, and password_env together")
 		}
 		if d.Role != "standalone" {
 			r := d.Replication
+			if r.PrimaryPort < 0 || r.PrimaryPort > 65535 || (r.PrimaryPort > 0 && r.PrimaryPort < 1024) {
+				return fmt.Errorf("database primary_port must be between 1024 and 65535")
+			}
 			if !nameRE.MatchString(r.User) || !envRE.MatchString(r.PasswordEnv) {
 				return fmt.Errorf("database replication requires a valid user and password_env")
 			}

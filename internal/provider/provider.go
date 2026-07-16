@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
@@ -86,13 +87,20 @@ func ReplicaStatus(c config.Config, p platform.Platform) (plan.Plan, error) {
 		if c.Database.Role == "primary" {
 			query = "SELECT application_name, client_addr, state, sync_state, write_lag, flush_lag, replay_lag FROM pg_stat_replication;"
 		}
-		result.Add(plan.AsUser("Show PostgreSQL replication status", "postgres", "psql", "-x", "-c", query))
+		args := []string{"-x", "-c", query}
+		if c.Database.Port > 0 {
+			args = append([]string{"-p", strconv.Itoa(c.Database.Port)}, args...)
+		}
+		result.Add(plan.AsUser("Show PostgreSQL replication status", "postgres", "psql", args...))
 	} else {
 		query := "SHOW REPLICA STATUS\\G"
 		if c.Database.Role == "primary" {
 			query = "SHOW MASTER STATUS\\G"
 		}
 		step := plan.Cmd("Show MariaDB replication status", "mariadb", true)
+		if c.Database.Port > 0 {
+			step.Args = []string{"--port", strconv.Itoa(c.Database.Port)}
+		}
 		step.Input = query + "\n"
 		result.Add(step)
 	}
@@ -354,7 +362,11 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		if d.Role == "replica" {
 			readOnly = "ON"
 		}
-		conf := fmt.Sprintf("# Managed by poorman\n[mariadb]\nserver_id=%s\nlog_bin=mysql-bin\nbinlog_format=ROW\ngtid_strict_mode=ON\nread_only=%s\nbind_address=0.0.0.0\n", serverID, readOnly)
+		port := ""
+		if d.Port > 0 {
+			port = fmt.Sprintf("port=%d\n", d.Port)
+		}
+		conf := fmt.Sprintf("# Managed by poorman\n[mariadb]\nserver_id=%s\n%slog_bin=mysql-bin\nbinlog_format=ROW\ngtid_strict_mode=ON\nread_only=%s\nbind_address=0.0.0.0\n", serverID, port, readOnly)
 		pn.Add(plan.ManagedFile("Configure MariaDB "+d.Role, "/etc/mysql/mariadb.conf.d/90-poorman-replication.cnf", conf, "root", 0o644))
 		if d.Role == "primary" {
 			input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", r.User, r.PasswordEnv, r.User)
@@ -362,7 +374,11 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 			pn.Add(step)
 		} else {
-			input := fmt.Sprintf("STOP REPLICA;\nCHANGE MASTER TO MASTER_HOST='%s', MASTER_USER='%s', MASTER_PASSWORD='${%s}', MASTER_USE_GTID=slave_pos;\nSTART REPLICA;\n", r.PrimaryHost, r.User, r.PasswordEnv)
+			primaryPort := ""
+			if r.PrimaryPort > 0 {
+				primaryPort = fmt.Sprintf(", MASTER_PORT=%d", r.PrimaryPort)
+			}
+			input := fmt.Sprintf("STOP REPLICA;\nCHANGE MASTER TO MASTER_HOST='%s', MASTER_USER='%s', MASTER_PASSWORD='${%s}'%s, MASTER_USE_GTID=slave_pos;\nSTART REPLICA;\n", r.PrimaryHost, r.User, r.PasswordEnv, primaryPort)
 			step := plan.Cmd("Attach MariaDB replica to primary", "mariadb", true)
 			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 			pn.Add(step)
@@ -384,15 +400,25 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		pn.Add(stopService(p, "postgresql"))
 		pn.Add(plan.Cmd("Verify PostgreSQL replica data directory is uninitialized", "test", true, "!", "-e", filepath.Join(dataDir, "PG_VERSION")))
 		args := []string{"-h", r.PrimaryHost, "-U", r.User, "-D", dataDir, "-R", "-X", "stream", "-P"}
+		if r.PrimaryPort > 0 {
+			args = append(args, "-p", strconv.Itoa(r.PrimaryPort))
+		}
 		if r.Slot != "" {
 			args = append(args, "-C", "-S", r.Slot)
 		}
 		step := plan.AsUser("Bootstrap PostgreSQL replica from primary", "postgres", "pg_basebackup", args...)
 		step.Input, step.Sensitive = "${"+r.PasswordEnv+"}\n", true
 		pn.Add(step)
+		if d.Port > 0 {
+			pn.Add(plan.EnsureLine("Set PostgreSQL replica port", filepath.Join(dataDir, "postgresql.conf"), fmt.Sprintf("port = %d", d.Port)))
+		}
 		pn.Warn("PostgreSQL replica bootstrap requires an empty data directory and a maintenance window; take a verified backup first")
 	}
-	pn.Add(restartService(p, "postgresql"))
+	if d.Role == "replica" && d.Port > 0 {
+		pn.Add(plan.AsUser("Start PostgreSQL replica instance", "postgres", "pg_ctl", "-D", databaseDataDir(d, p), "-l", filepath.Join(databaseDataDir(d, p), "poorman.log"), "start"))
+	} else {
+		pn.Add(restartService(p, "postgresql"))
+	}
 }
 
 func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
