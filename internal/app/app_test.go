@@ -20,6 +20,31 @@ func TestInputReaderPreservesExistingBuffer(t *testing.T) {
 	}
 }
 
+func TestEnsureDatabasePasswordPersistsGeneratedValue(t *testing.T) {
+	name := "POORMAN_TEST_GENERATED_DB_PASSWORD"
+	t.Setenv(name, "")
+	path := filepath.Join(t.TempDir(), "server.json")
+	c := config.Config{Database: &config.Database{PasswordEnv: name}}
+	var out bytes.Buffer
+	if err := ensureDatabasePassword(c, path, &out); err != nil {
+		t.Fatal(err)
+	}
+	first := os.Getenv(name)
+	if len(first) < 40 {
+		t.Fatalf("generated password is unexpectedly short: %d", len(first))
+	}
+	if info, err := os.Stat(path + ".secrets"); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("secrets file permissions = %v, err = %v", info, err)
+	}
+	os.Unsetenv(name)
+	if err := ensureDatabasePassword(c, path, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv(name); got != first {
+		t.Fatalf("reloaded password = %q, want original", got)
+	}
+}
+
 func TestTUIWritesSelectedConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server.json")
 	in := bytes.NewBufferString("2\nblog.example.com\n\n")

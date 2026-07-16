@@ -3,6 +3,8 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -955,9 +957,58 @@ func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut 
 			return nil
 		}
 	}
+	if err := ensureDatabasePassword(c, *path, out); err != nil {
+		return err
+	}
 	err = executor.Apply(ctx, p, reader, out, errOut)
 	discardBlankInput(reader)
 	return err
+}
+
+func ensureDatabasePassword(c config.Config, configPath string, out io.Writer) error {
+	if c.Database == nil || c.Database.PasswordEnv == "" {
+		return nil
+	}
+	if value := os.Getenv(c.Database.PasswordEnv); value != "" {
+		return nil
+	}
+
+	secretPath := configPath + ".secrets"
+	secrets, err := os.ReadFile(secretPath)
+	if err == nil {
+		for _, line := range strings.Split(string(secrets), "\n") {
+			key, value, ok := strings.Cut(line, "=")
+			if ok && strings.TrimSpace(key) == c.Database.PasswordEnv && value != "" {
+				if err := os.Setenv(c.Database.PasswordEnv, value); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read secrets file: %w", err)
+	}
+
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Errorf("generate database password: %w", err)
+	}
+	value := base64.RawURLEncoding.EncodeToString(raw)
+	if err := os.Setenv(c.Database.PasswordEnv, value); err != nil {
+		return err
+	}
+
+	content := strings.TrimRight(string(secrets), "\n")
+	if content != "" {
+		content += "\n"
+	}
+	content += c.Database.PasswordEnv + "=" + value + "\n"
+	if err := os.WriteFile(secretPath, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write secrets file %s: %w", secretPath, err)
+	}
+	_ = os.Chmod(secretPath, 0o600)
+	fmt.Fprintf(out, "Generated and saved database password to %s\n", secretPath)
+	return nil
 }
 
 // inputReader preserves an existing buffer. Wrapping a *bufio.Reader in a
