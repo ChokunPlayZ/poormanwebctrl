@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "web_server": { "provider": "nginx" },
+  "database": {
+    "provider": "mariadb",
+    "role": "standalone",
+    "name": "wordpress",
+    "user": "wordpress",
+    "password_env": "POORMAN_DB_PASSWORD"
+  },
+  "access": {
+    "users": [{ "name": "website", "home": "/home/website", "sftp_only": true }]
+  },
+  "sites": [{
+    "domain": "blog.example.com",
+    "root": "/var/www/blog.example.com",
+    "owner": "website",
+    "runtime": "php",
+    "wordpress": {
+      "title": "My blog",
+      "admin_user": "siteadmin",
+      "admin_email": "admin@example.com",
+      "admin_password_env": "POORMAN_WP_ADMIN_PASSWORD"
+    }
+  }],
+  "tls": { "enabled": true, "email": "admin@example.com" },
+  "firewall": { "enabled": true },
+  "backups": { "enabled": true, "destination": "/var/backups/poorman", "schedule": "0 3 * * *" }
+}

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "web_server": { "provider": "nginx" },
+  "database": {
+    "provider": "postgresql",
+    "role": "primary",
+    "replication": {
+      "user": "replicator",
+      "password_env": "POORMAN_REPLICATION_PASSWORD",
+      "allowed_cidr": "10.20.0.0/24",
+      "slot": "web_replica_1"
+    }
+  },
+  "firewall": { "enabled": true }
+}

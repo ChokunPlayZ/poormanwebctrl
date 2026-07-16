@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "web_server": { "provider": "apache" },
+  "database": {
+    "provider": "mariadb",
+    "role": "replica",
+    "replication": {
+      "primary_host": "10.30.0.10",
+      "user": "replicator",
+      "password_env": "POORMAN_REPLICATION_PASSWORD",
+      "node_id": 2
+    }
+  },
+  "firewall": { "enabled": true }
+}

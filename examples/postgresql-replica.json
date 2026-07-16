@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "web_server": { "provider": "nginx" },
+  "database": {
+    "provider": "postgresql",
+    "role": "replica",
+    "data_dir": "/var/lib/postgresql/18/main",
+    "replication": {
+      "primary_host": "10.20.0.10",
+      "user": "replicator",
+      "password_env": "POORMAN_REPLICATION_PASSWORD",
+      "slot": "web_replica_1"
+    }
+  },
+  "firewall": { "enabled": true }
+}
