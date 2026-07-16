@@ -125,16 +125,19 @@ func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOu
 	if err != nil {
 		return err
 	}
+	reader := inputReader(in)
 	operation.Print(out)
 	if action == "promote" && !*yes {
 		fmt.Fprint(out, "Type PROMOTE to confirm the old primary is fenced: ")
-		answer, _ := bufio.NewReader(in).ReadString('\n')
+		answer, _ := reader.ReadString('\n')
 		if strings.TrimSpace(answer) != "PROMOTE" {
 			fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
 	}
-	return executor.Apply(ctx, operation, in, out, errOut)
+	applyErr := executor.Apply(ctx, operation, reader, out, errOut)
+	discardBlankInput(reader)
+	return applyErr
 }
 
 func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
@@ -145,16 +148,19 @@ func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut
 		return err
 	}
 	operation := plan.Plan{Platform: "local", Steps: []plan.Step{plan.Cmd("Run configured backup", "/usr/local/sbin/poorman-backup", true)}}
+	reader := inputReader(in)
 	operation.Print(out)
 	if !*yes {
 		fmt.Fprint(out, "Run backup now? [y/N] ")
-		answer, _ := bufio.NewReader(in).ReadString('\n')
+		answer, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
 			fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
 	}
-	return executor.Apply(ctx, operation, in, out, errOut)
+	applyErr := executor.Apply(ctx, operation, reader, out, errOut)
+	discardBlankInput(reader)
+	return applyErr
 }
 
 func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -939,14 +945,40 @@ func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut 
 	if err != nil {
 		return err
 	}
+	reader := inputReader(in)
 	p.Print(out)
 	if !*yes {
 		fmt.Fprint(out, "Apply this plan? [y/N] ")
-		answer, _ := bufio.NewReader(in).ReadString('\n')
+		answer, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
 			fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
 	}
-	return executor.Apply(ctx, p, in, out, errOut)
+	err = executor.Apply(ctx, p, reader, out, errOut)
+	discardBlankInput(reader)
+	return err
+}
+
+// inputReader preserves an existing buffer. Wrapping a *bufio.Reader in a
+// second reader can read ahead past a confirmation newline, consuming an
+// Enter intended for the dashboard after the operation finishes.
+func inputReader(in io.Reader) *bufio.Reader {
+	if reader, ok := in.(*bufio.Reader); ok {
+		return reader
+	}
+	return bufio.NewReader(in)
+}
+
+// An Enter pressed during a command is intentionally not sent to the
+// command. Remove the resulting blank line before the next dashboard prompt
+// so it cannot be interpreted as that prompt's default action.
+func discardBlankInput(reader *bufio.Reader) {
+	for {
+		line, err := reader.Peek(1)
+		if err != nil || line[0] != '\n' {
+			return
+		}
+		_, _ = reader.ReadString('\n')
+	}
 }

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -8,6 +9,16 @@ import (
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 )
+
+func TestInputReaderPreservesExistingBuffer(t *testing.T) {
+	reader := bufio.NewReader(bytes.NewBufferString("y\n\nnext\n"))
+	if got, _ := inputReader(reader).ReadString('\n'); got != "y\n" {
+		t.Fatalf("confirmation = %q, want %q", got, "y\n")
+	}
+	if got, _ := reader.ReadString('\n'); got != "\n" {
+		t.Fatalf("queued Enter = %q, want a blank line", got)
+	}
+}
 
 func TestTUIWritesSelectedConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server.json")

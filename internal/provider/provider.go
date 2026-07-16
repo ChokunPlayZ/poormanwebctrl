@@ -270,8 +270,11 @@ func addOpenLiteSpeedInstall(pn *plan.Plan, c config.Config, p platform.Platform
 func addPackageSteps(pn *plan.Plan, p platform.Platform, packages []string) {
 	switch p.Family {
 	case "debian":
-		pn.Add(plan.Cmd("Refresh package metadata", "apt-get", true, "update"))
-		pn.Add(plan.Cmd("Install required packages", "apt-get", true, append([]string{"install", "-y"}, packages...)...))
+		// Disable apt's pseudo-terminal progress handling. It emits carriage
+		// return-only status lines that look frozen when forwarded by the TUI.
+		aptOptions := []string{"-o", "Dpkg::Use-Pty=0"}
+		pn.Add(plan.Cmd("Refresh package metadata", "apt-get", true, append(aptOptions, "update")...))
+		pn.Add(plan.Cmd("Install required packages", "apt-get", true, append(append(aptOptions, "install", "-y"), packages...)...))
 	case "rhel":
 		pn.Add(plan.Cmd("Install required packages", "dnf", true, append([]string{"install", "-y"}, packages...)...))
 	case "alpine":
