@@ -95,7 +95,20 @@ func applyFile(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Wr
 
 func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) error {
 	if s.UnlessCommand != "" {
-		check := exec.CommandContext(ctx, s.UnlessCommand, s.UnlessArgs...)
+		checkCommand, checkArgs := s.UnlessCommand, append([]string(nil), s.UnlessArgs...)
+		if s.RunAs != "" {
+			checkArgs = append([]string{"-u", s.RunAs, "--", checkCommand}, checkArgs...)
+			if os.Geteuid() == 0 {
+				checkCommand = "runuser"
+			} else {
+				checkCommand = "sudo"
+				checkArgs = append([]string{"-n"}, checkArgs...)
+			}
+		} else if s.NeedsRoot && os.Geteuid() != 0 {
+			checkArgs = append([]string{"-n", checkCommand}, checkArgs...)
+			checkCommand = "sudo"
+		}
+		check := exec.CommandContext(ctx, checkCommand, checkArgs...)
 		if check.Run() == nil {
 			fmt.Fprintln(out, "  already satisfied; skipped")
 			return nil

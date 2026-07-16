@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
+	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 	"github.com/chokunplayz/poormanwebctrl/internal/platform"
 )
 
@@ -178,6 +179,132 @@ func TestSameMachinePostgresReplicaKeepsPrimaryRunning(t *testing.T) {
 	}
 	if !foundBootstrap || !foundStart {
 		t.Fatalf("replica plan missing bootstrap/start: bootstrap=%t start=%t", foundBootstrap, foundStart)
+	}
+}
+
+func TestSameMachineMariaDBReplicaUsesIndependentService(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "replica"
+	c.Database.Port = 3307
+	c.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	c.Database.Replication = config.Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := map[string]bool{
+		"Create MariaDB replica data directory":               false,
+		"Create MariaDB replica runtime directory":            false,
+		"Initialize MariaDB replica data directory":           false,
+		"Install independent MariaDB replica service":         false,
+		"Restart independent MariaDB replica service":         false,
+		"Seed MariaDB replica from local primary":             false,
+		"Load primary snapshot into MariaDB replica":          false,
+		"Attach independent MariaDB replica to local primary": false,
+	}
+	for _, step := range p.Steps {
+		if _, ok := wants[step.Description]; ok {
+			wants[step.Description] = true
+		}
+		if step.Description == "Configure MariaDB replica" {
+			t.Fatal("local replica overwrites the primary's global MariaDB configuration")
+		}
+		if step.Description == "Enable and start mariadb" || step.Description == "Reload or restart mariadb" {
+			t.Fatal("local replica plan manipulates the primary MariaDB service")
+		}
+		if step.Description == "Install independent MariaDB replica service" {
+			if step.Path != "/etc/systemd/system/poorman-mariadb-replica-3307.service" || !strings.Contains(step.Content, "Restart=on-failure") || strings.Contains(step.Content, "Requires=mariadb.service") {
+				t.Fatalf("independent service is not isolated from primary failure: %#v", step)
+			}
+		}
+		if step.Description == "Attach independent MariaDB replica to local primary" && !strings.Contains(strings.Join(step.Args, " "), "--socket=/run/poorman-mariadb-replica-3307/mariadb.sock") {
+			t.Fatalf("replication SQL does not target the replica socket: %v", step.Args)
+		}
+		if step.Description == "Install backup script" {
+			if step.Path != "/usr/local/sbin/poorman-backup-poorman-mariadb-replica-3307" || !strings.Contains(step.Content, "--socket='/run/poorman-mariadb-replica-3307/mariadb.sock'") {
+				t.Fatalf("replica backup is not isolated from the primary: %#v", step)
+			}
+		}
+	}
+	for description, found := range wants {
+		if !found {
+			t.Errorf("plan missing %q", description)
+		}
+	}
+}
+
+func TestSameMachineMariaDBStatusAndPromotionTargetReplicaSocket(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "replica"
+	c.Database.Port = 3307
+	c.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	c.Database.Replication = config.Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2}
+	for name, build := range map[string]func() (plan.Plan, error){
+		"status": func() (plan.Plan, error) {
+			return ReplicaStatus(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+		},
+		"promotion": func() (plan.Plan, error) {
+			return PromoteReplica(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+		},
+	} {
+		operation, err := build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		step := operation.Steps[len(operation.Steps)-1]
+		if !strings.Contains(strings.Join(step.Args, " "), "--socket=/run/poorman-mariadb-replica-3307/mariadb.sock") {
+			t.Errorf("%s does not target replica socket: %#v", name, operation.Steps)
+		}
+		if name == "promotion" && (len(operation.Steps) != 2 || operation.Steps[0].Description != "Persist promoted MariaDB instance as writable") {
+			t.Errorf("promotion does not persist writable state: %#v", operation.Steps)
+		}
+		if name == "promotion" && (!strings.Contains(operation.Steps[0].Content, "read_only=OFF") || operation.Steps[0].Mode != 0o644) {
+			t.Errorf("promoted service config is not readable and writable: %#v", operation.Steps[0])
+		}
+	}
+}
+
+func TestPromotedSameMachineMariaDBKeepsIndependentService(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "primary"
+	c.Database.Port = 3307
+	c.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	c.Database.Replication = config.Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "127.0.0.1/32", NodeID: 2}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundWritableConfig, foundCustomSQL := false, false
+	for _, step := range p.Steps {
+		if step.Description == "Enable and start mariadb" || step.Description == "Configure MariaDB primary" {
+			t.Fatal("promoted instance plan manipulates the old primary service")
+		}
+		if step.Description == "Configure independent MariaDB instance" && strings.Contains(step.Content, "read_only=OFF") {
+			foundWritableConfig = true
+		}
+		if step.Description == "Update application database on promoted MariaDB instance" && strings.Contains(strings.Join(step.Args, " "), "--socket=/run/poorman-mariadb-replica-3307/mariadb.sock") {
+			foundCustomSQL = true
+		}
+		if step.Description == "Seed MariaDB replica from local primary" || step.Description == "Attach independent MariaDB replica to local primary" {
+			t.Fatal("promoted instance plan tries to reseed or reattach as a replica")
+		}
+	}
+	if !foundWritableConfig || !foundCustomSQL {
+		t.Fatalf("promoted plan does not retain independent writable service: config=%t sql=%t", foundWritableConfig, foundCustomSQL)
+	}
+}
+
+func TestSameMachineMariaDBReplicaRejectsUnsupportedOpenRC(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "replica"
+	c.Database.Port = 3307
+	c.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	c.Database.Replication = config.Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2}
+	if _, err := Build(c, platform.Platform{Distro: "alpine", Family: "alpine"}); err == nil {
+		t.Fatal("expected a clear unsupported OpenRC error")
 	}
 }
 

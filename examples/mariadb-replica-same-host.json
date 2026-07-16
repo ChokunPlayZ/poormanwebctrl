@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "web_server": { "provider": "nginx" },
+  "database": {
+    "provider": "mariadb",
+    "role": "replica",
+    "data_dir": "/var/lib/mysql/poorman-replica-3307",
+    "port": 3307,
+    "replication": {
+      "primary_host": "127.0.0.1",
+      "primary_port": 3306,
+      "user": "replicator",
+      "password_env": "POORMAN_REPLICATION_PASSWORD",
+      "node_id": 2
+    }
+  },
+  "firewall": { "enabled": true }
+}

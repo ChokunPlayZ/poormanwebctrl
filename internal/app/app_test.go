@@ -219,12 +219,14 @@ func TestConfigureReplicationSetsMariaDBPrimaryNodeID(t *testing.T) {
 	}
 }
 
-func TestConfigureReplicationRejectsSameMachineMariaDB(t *testing.T) {
+func TestConfigureReplicationCreatesIndependentSameMachineMariaDB(t *testing.T) {
 	database := &config.Database{Provider: "mariadb", Role: "replica"}
 	var out bytes.Buffer
-	err := configureReplication(bufio.NewReader(bytes.NewBufferString("\n\ny\n")), newTerminalUI(&out), database)
-	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("not supported")) {
-		t.Fatalf("error = %v, want clear unsupported same-machine error", err)
+	if err := configureReplication(bufio.NewReader(bytes.NewBufferString("\n\ny\n\n\n\n\n\n")), newTerminalUI(&out), database); err != nil {
+		t.Fatal(err)
+	}
+	if database.Port != 3307 || database.Replication.PrimaryPort != 3306 || database.DataDir != "/var/lib/mysql/poorman-replica-3307" {
+		t.Fatalf("database = %#v, want independent local MariaDB instance defaults", database)
 	}
 }
 
@@ -248,6 +250,13 @@ func TestReplicaSecretsAreCopiedFromPrimaryConfig(t *testing.T) {
 	c.Database.Role = "replica"
 	if err := copyConfigSecrets(primaryPath, replicaPath, c); err != nil {
 		t.Fatal(err)
+	}
+	replicaSecrets, err := readSecretValues(replicaPath + ".secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replicaSecrets[databaseEnv] == "" {
+		t.Fatal("replica handoff did not preserve the application database secret needed after promotion")
 	}
 	os.Unsetenv(databaseEnv)
 	os.Unsetenv(replicationEnv)
@@ -432,7 +441,7 @@ func TestDashboardDoesNotRunDisabledBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := Run([]string{"tui", "-f", path}, bytes.NewBufferString("4\n0\n"), &out, &out); err != nil {
+	if err := Run([]string{"tui", "-f", path}, bytes.NewBufferString("4\n\n0\n"), &out, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(out.Bytes(), []byte("Backups are disabled")) {
@@ -440,14 +449,47 @@ func TestDashboardDoesNotRunDisabledBackup(t *testing.T) {
 	}
 }
 
-func TestGuidedSetupRejectsSameMachineMariaDBReplica(t *testing.T) {
+func TestBackupScriptPathTargetsIndependentMariaDBReplica(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "replica"
+	c.Database.Port = 3307
+	c.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	c.Database.Replication.PrimaryHost = "127.0.0.1"
+	if got := backupScriptPath(c); got != "/usr/local/sbin/poorman-backup-poorman-mariadb-replica-3307" {
+		t.Fatalf("backup script = %q", got)
+	}
+}
+
+func TestDashboardKeepsReplicaSetupErrorVisible(t *testing.T) {
+	dir := t.TempDir()
+	primaryPath := filepath.Join(dir, "primary.json")
+	if err := config.WriteDefault(primaryPath); err != nil {
+		t.Fatal(err)
+	}
+	input := "10\n" + primaryPath + "\n\n0\n"
+	var out bytes.Buffer
+	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Replica setup unavailable: replica configuration must be different")) {
+		t.Fatalf("dashboard did not show the replica setup error:\n%s", out.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Press enter to continue")) {
+		t.Fatalf("dashboard did not pause on the replica setup error:\n%s", out.String())
+	}
+}
+
+func TestGuidedSetupCreatesSameMachineMariaDBReplica(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replica.json")
 	var out bytes.Buffer
-	err := Run([]string{"replica", "setup", "-f", path}, bytes.NewBufferString("\n\n\nyes\n"), &out, &out)
-	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("same-machine MariaDB replicas are not supported")) {
-		t.Fatalf("replica setup error = %v", err)
+	if err := Run([]string{"replica", "setup", "-f", path}, bytes.NewBufferString("\n\n\nyes\n\n\n\n\n\n"), &out, &out); err != nil {
+		t.Fatal(err)
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("unsupported replica setup wrote a config: %v", statErr)
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database.Port != 3307 || c.Database.DataDir != "/var/lib/mysql/poorman-replica-3307" || c.Database.Replication.PrimaryHost != "127.0.0.1" {
+		t.Fatalf("database = %#v, want independent local MariaDB replica", c.Database)
 	}
 }

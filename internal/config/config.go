@@ -235,8 +235,17 @@ func (c Config) Validate() error {
 			if d.Role == "replica" && net.ParseIP(r.PrimaryHost) == nil && !validDomain(r.PrimaryHost) {
 				return fmt.Errorf("database replica requires a valid primary_host")
 			}
-			if d.Provider == "mariadb" && d.Role == "replica" && isLoopbackHost(r.PrimaryHost) {
-				return fmt.Errorf("same-machine MariaDB replicas are not supported; use a separate host")
+			if d.Provider == "mariadb" && isLoopbackHost(r.PrimaryHost) && (d.Role == "replica" || d.DataDir != "") {
+				primaryPort := r.PrimaryPort
+				if primaryPort == 0 {
+					primaryPort = 3306
+				}
+				if d.Port == 0 || d.Port == primaryPort {
+					return fmt.Errorf("same-machine MariaDB instance requires an explicit port different from primary_port")
+				}
+				if !safeManagedPath(d.DataDir) || filepath.Clean(d.DataDir) == "/var/lib/mysql" {
+					return fmt.Errorf("same-machine MariaDB instance requires a separate absolute data_dir")
+				}
 			}
 			if d.Provider == "postgresql" && d.Role == "replica" && isLoopbackHost(r.PrimaryHost) {
 				primaryPort := r.PrimaryPort
@@ -287,7 +296,7 @@ func validDomain(s string) bool {
 }
 
 func safeManagedPath(path string) bool {
-	if !filepath.IsAbs(path) {
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") {
 		return false
 	}
 	clean := filepath.Clean(path)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
 	"strings"
 
@@ -19,10 +20,11 @@ type Check struct {
 func Checks(c config.Config, p platform.Platform) []Check {
 	services := []string{webService(c.WebServer.Provider, p)}
 	if c.Database != nil {
-		services = append(services, c.Database.Provider)
-		if c.Database.Provider == "postgresql" {
-			services[len(services)-1] = "postgresql"
+		databaseService := c.Database.Provider
+		if isLocalMariaDBReplica(*c.Database) {
+			databaseService = fmt.Sprintf("poorman-mariadb-replica-%d", c.Database.Port)
 		}
+		services = append(services, databaseService)
 	}
 	if c.Access.FTP.Enabled {
 		services = append(services, "vsftpd")
@@ -50,6 +52,17 @@ func Checks(c config.Config, p platform.Platform) []Check {
 		checks = append(checks, Check{Name: site.Domain + " local HTTP", Command: "curl", Args: []string{"-fsS", "-o", "/dev/null", "-H", "Host: " + site.Domain, "http://127.0.0.1/"}})
 	}
 	return checks
+}
+
+func isLocalMariaDBReplica(d config.Database) bool {
+	if d.Provider != "mariadb" || d.Port == 0 || d.DataDir == "" {
+		return false
+	}
+	if strings.EqualFold(d.Replication.PrimaryHost, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(d.Replication.PrimaryHost)
+	return ip != nil && ip.IsLoopback()
 }
 
 func Report(ctx context.Context, c config.Config, p platform.Platform, out io.Writer) error {

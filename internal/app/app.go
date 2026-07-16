@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +81,7 @@ Usage:
   poorman replica setup [-f replica.json] [--from primary.json]
   poorman replica status [-f poorman.json]
   poorman replica promote [-f poorman.json] [--yes]
-  poorman backup [--yes]
+  poorman backup [-f poorman.json] [--yes]
   poorman version
 
 Start with "poorman init", edit the file, then preview with "poorman plan".`)
@@ -172,6 +173,7 @@ func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOu
 func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(out)
+	path := fs.String("f", "poorman.json", "configuration file")
 	yes := fs.Bool("yes", false, "skip confirmation")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -182,7 +184,14 @@ func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut
 	if err := requireNoArgs(fs); err != nil {
 		return err
 	}
-	operation := plan.Plan{Platform: "local", Steps: []plan.Step{plan.Cmd("Run configured backup", "/usr/local/sbin/poorman-backup", true)}}
+	c, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if !c.Backups.Enabled {
+		return fmt.Errorf("backups are disabled in %s", *path)
+	}
+	operation := plan.Plan{Platform: "local", Steps: []plan.Step{plan.Cmd("Run configured backup", backupScriptPath(c), true)}}
 	reader := inputReader(in)
 	operation.Print(out)
 	if !*yes {
@@ -196,6 +205,28 @@ func backupCommand(ctx context.Context, args []string, in io.Reader, out, errOut
 	applyErr := executor.Apply(ctx, operation, reader, out, errOut)
 	discardBlankInput(reader)
 	return applyErr
+}
+
+func backupScriptPath(c config.Config) string {
+	if service := managedMariaDBService(c); service != "" {
+		return "/usr/local/sbin/poorman-backup-" + service
+	}
+	return "/usr/local/sbin/poorman-backup"
+}
+
+func managedMariaDBService(c config.Config) string {
+	if c.Database != nil && c.Database.Provider == "mariadb" && c.Database.Port > 0 && c.Database.DataDir != "" && isLoopbackAddress(c.Database.Replication.PrimaryHost) {
+		return fmt.Sprintf("poorman-mariadb-replica-%d", c.Database.Port)
+	}
+	return ""
+}
+
+func isLoopbackAddress(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -289,9 +320,6 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 	}
 	if database.Role == "replica" {
 		local := yesNo(prompt(reader, ui, "Is the primary on this machine? (y/N)", "n"))
-		if local && database.Provider == "mariadb" {
-			return fmt.Errorf("same-machine MariaDB replicas are not supported yet; use a separate host or PostgreSQL")
-		}
 		primaryHostDefault := "10.20.0.10"
 		if local {
 			primaryHostDefault = "127.0.0.1"
@@ -316,6 +344,11 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 			}
 			database.DataDir = prompt(reader, ui, "PostgreSQL data directory", defaultValue(database.DataDir, dataDirDefault))
 		} else {
+			if local {
+				dataDirDefault := fmt.Sprintf("/var/lib/mysql/poorman-replica-%d", database.Port)
+				database.DataDir = prompt(reader, ui, "MariaDB replica data directory", defaultValue(database.DataDir, dataDirDefault))
+				ui.muted("The replica gets its own MariaDB service, data directory, socket, PID, log, and port.")
+			}
 			nodeDefault := "2"
 			if database.Replication.NodeID > 0 {
 				nodeDefault = strconv.Itoa(database.Replication.NodeID)
@@ -444,47 +477,58 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 		switch choice {
 		case "1":
 			if err := planCommand([]string{"-f", path}, ui); err != nil {
-				return err
+				ui.warn("Plan unavailable: " + err.Error())
 			}
+			pause(reader, ui)
 		case "2":
 			if err := applyCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
-				return err
+				ui.warn("Apply failed: " + err.Error())
 			}
+			pause(reader, ui)
 		case "3":
 			if err := statusCommand(ctx, []string{"-f", path}, ui); err != nil {
 				ui.warn("Health warning: " + err.Error())
 			}
+			pause(reader, ui)
 		case "4":
 			if !c.Backups.Enabled {
 				ui.warn("Backups are disabled in Stack settings.")
+				pause(reader, ui)
 				continue
 			}
-			if err := backupCommand(ctx, nil, reader, ui, ui); err != nil {
-				return err
+			if err := backupCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
+				ui.warn("Backup failed: " + err.Error())
 			}
+			pause(reader, ui)
 		case "5":
 			if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
 				ui.warn("Replication is not configured. Use guided replica setup or Stack settings first.")
+				pause(reader, ui)
 				continue
 			}
 			if err := replicaCommand(ctx, []string{"status", "-f", path}, reader, ui, ui); err != nil {
 				ui.warn("Replication status unavailable: " + err.Error())
 			}
+			pause(reader, ui)
 		case "6":
 			if err := firewallTUI(ctx, path, reader, ui); err != nil {
 				ui.warn("Firewall operation unavailable: " + err.Error())
+				pause(reader, ui)
 			}
 		case "7":
 			if err := operationsTUI(ctx, c, reader, ui); err != nil {
 				ui.warn("Operations unavailable: " + err.Error())
+				pause(reader, ui)
 			}
 		case "8":
 			if err := vhostsTUI(path, reader, ui); err != nil {
 				ui.warn("Virtual host management unavailable: " + err.Error())
+				pause(reader, ui)
 			}
 		case "9":
 			if err := stackSettingsTUI(path, reader, ui); err != nil {
 				ui.warn("Stack settings unavailable: " + err.Error())
+				pause(reader, ui)
 			}
 		case "10":
 			replicaPath, err := guidedReplicaSetupTUI(ctx, path, reader, ui)
@@ -493,11 +537,13 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 			}
 			if err != nil {
 				ui.warn("Replica setup unavailable: " + err.Error())
+				pause(reader, ui)
 			}
 		case "0", "q", "Q":
 			return nil
 		default:
 			ui.warn("Unknown selection.")
+			pause(reader, ui)
 		}
 	}
 }
@@ -836,7 +882,11 @@ func operationsTUI(ctx context.Context, c config.Config, reader *bufio.Reader, u
 func configuredServices(c config.Config) []string {
 	services := []string{webServiceName(c.WebServer.Provider)}
 	if c.Database != nil {
-		services = append(services, c.Database.Provider)
+		databaseService := c.Database.Provider
+		if managed := managedMariaDBService(c); managed != "" {
+			databaseService = managed
+		}
+		services = append(services, databaseService)
 	}
 	if c.Access.FTP.Enabled {
 		services = append(services, "vsftpd")
@@ -1317,6 +1367,24 @@ func requiredConfigSecrets(c config.Config) map[string]bool {
 	return required
 }
 
+func configSecretNames(c config.Config) map[string]bool {
+	names := map[string]bool{}
+	if c.Database != nil {
+		if c.Database.PasswordEnv != "" {
+			names[c.Database.PasswordEnv] = true
+		}
+		if c.Database.Replication.PasswordEnv != "" {
+			names[c.Database.Replication.PasswordEnv] = true
+		}
+	}
+	for _, site := range c.Sites {
+		if site.WordPress != nil && site.WordPress.AdminPassEnv != "" {
+			names[site.WordPress.AdminPassEnv] = true
+		}
+	}
+	return names
+}
+
 func ensureConfigSecrets(c config.Config, configPath string, out io.Writer) error {
 	required := requiredConfigSecrets(c)
 	if len(required) == 0 {
@@ -1381,7 +1449,7 @@ func copyConfigSecrets(sourceConfigPath, destinationConfigPath string, c config.
 		return err
 	}
 	changed := false
-	for name := range requiredConfigSecrets(c) {
+	for name := range configSecretNames(c) {
 		value := source[name]
 		if value == "" {
 			value = os.Getenv(name)

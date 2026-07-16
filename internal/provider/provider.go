@@ -17,6 +17,9 @@ func Build(c config.Config, p platform.Platform) (plan.Plan, error) {
 	if c.WebServer.Provider == "openlitespeed" && p.Family == "alpine" {
 		return plan.Plan{}, fmt.Errorf("OpenLiteSpeed supports Debian/Ubuntu and RHEL-family packages, not Alpine")
 	}
+	if c.Database != nil && isManagedMariaDBInstance(*c.Database) && p.Family == "alpine" {
+		return plan.Plan{}, fmt.Errorf("same-machine MariaDB replicas require systemd; Alpine/OpenRC is not supported yet")
+	}
 	result := plan.Plan{Platform: p.Distro}
 	packages := packageSet(c, p)
 	addPackageSteps(&result, p, packages)
@@ -105,7 +108,10 @@ func ReplicaStatus(c config.Config, p platform.Platform) (plan.Plan, error) {
 			query = "SHOW MASTER STATUS\\G"
 		}
 		step := plan.Cmd("Show MariaDB replication status", "mariadb", true)
-		if c.Database.Port > 0 {
+		if isManagedMariaDBInstance(*c.Database) {
+			layout := mariaDBReplicaLayout(*c.Database)
+			step.Args = []string{"--protocol=socket", "--socket=" + layout.Socket}
+		} else if c.Database.Port > 0 {
 			step.Args = []string{"--port", strconv.Itoa(c.Database.Port)}
 		}
 		step.Input = query + "\n"
@@ -122,7 +128,15 @@ func PromoteReplica(c config.Config, p platform.Platform) (plan.Plan, error) {
 	if c.Database.Provider == "postgresql" {
 		result.Add(plan.AsUser("Promote PostgreSQL replica", "postgres", "pg_ctl", "promote", "-D", databaseDataDir(*c.Database, p)))
 	} else {
+		if isLocalMariaDBReplica(*c.Database) {
+			layout := mariaDBReplicaLayout(*c.Database)
+			result.Add(plan.ManagedFile("Persist promoted MariaDB instance as writable", layout.Config, mariaDBInstanceConfig(*c.Database, false), "root", 0o644))
+		}
 		step := plan.Cmd("Promote MariaDB replica", "mariadb", true)
+		if isLocalMariaDBReplica(*c.Database) {
+			layout := mariaDBReplicaLayout(*c.Database)
+			step.Args = []string{"--protocol=socket", "--socket=" + layout.Socket}
+		}
 		step.Input = "STOP REPLICA;\nRESET REPLICA ALL;\nSET GLOBAL read_only=OFF;\n"
 		result.Add(step)
 	}
@@ -189,7 +203,7 @@ func packageSet(c config.Config, p platform.Platform) []string {
 	if c.Backups.Enabled {
 		set["rsync"] = true
 	}
-	writableWordPress := anyWordPress(c) && (c.Database == nil || c.Database.Role != "replica")
+	writableWordPress := anyWordPress(c) && wordpressInitializationAllowed(c)
 	if writableWordPress {
 		set["curl"] = true
 		set["tar"] = true
@@ -344,7 +358,11 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 		step.UnlessCommand, step.UnlessArgs = "test", []string{"-e", "/var/lib/postgresql/data/PG_VERSION"}
 		pn.Add(step)
 	}
-	if !(d.Provider == "postgresql" && d.Role == "replica") {
+	if isManagedMariaDBInstance(*d) && d.Role == "primary" {
+		addPromotedMariaDBPrimary(pn, *d, p)
+		return
+	}
+	if !(d.Provider == "postgresql" && d.Role == "replica") && !isLocalMariaDBReplica(*d) {
 		pn.Add(enableService(p, service))
 	}
 	if d.Role != "replica" && d.Name != "" && d.User != "" {
@@ -369,6 +387,10 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 	r := d.Replication
 	if d.Provider == "mariadb" {
+		if isLocalMariaDBReplica(d) {
+			addLocalMariaDBReplica(pn, d, p)
+			return
+		}
 		serverID := fmt.Sprint(r.NodeID)
 		readOnly := "OFF"
 		if d.Role == "replica" {
@@ -442,6 +464,112 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 	}
 }
 
+type mariaDBInstanceLayout struct {
+	Service, Config, Unit, DataDir, RuntimeDir, Socket, PID, Log, Seed, SeedMarker string
+}
+
+func isLocalMariaDBReplica(d config.Database) bool {
+	return d.Role == "replica" && isManagedMariaDBInstance(d)
+}
+
+func isManagedMariaDBInstance(d config.Database) bool {
+	return d.Provider == "mariadb" && d.Port > 0 && d.DataDir != "" && isLoopbackHost(d.Replication.PrimaryHost)
+}
+
+func mariaDBReplicaLayout(d config.Database) mariaDBInstanceLayout {
+	service := fmt.Sprintf("poorman-mariadb-replica-%d", d.Port)
+	runtimeDir := filepath.Join("/run", service)
+	return mariaDBInstanceLayout{
+		Service:    service,
+		Config:     filepath.Join("/etc/poorman", service+".cnf"),
+		Unit:       filepath.Join("/etc/systemd/system", service+".service"),
+		DataDir:    d.DataDir,
+		RuntimeDir: runtimeDir,
+		Socket:     filepath.Join(runtimeDir, "mariadb.sock"),
+		PID:        filepath.Join(runtimeDir, "mariadb.pid"),
+		Log:        filepath.Join(d.DataDir, "mariadb.log"),
+		Seed:       filepath.Join(d.DataDir, ".poorman-replica-seed.sql"),
+		SeedMarker: filepath.Join(d.DataDir, ".poorman-replica-seeded"),
+	}
+}
+
+func mariaDBInstanceConfig(d config.Database, readOnly bool) string {
+	layout := mariaDBReplicaLayout(d)
+	readOnlyValue := "OFF"
+	if readOnly {
+		readOnlyValue = "ON"
+	}
+	return fmt.Sprintf("# Managed by poorman\n[mariadbd]\ndatadir=%s\nport=%d\nsocket=%s\npid-file=%s\nlog-error=%s\nserver_id=%d\nlog_bin=%s\nrelay_log=%s\nbinlog_format=ROW\ngtid_strict_mode=ON\nlog_slave_updates=ON\nrelay_log_recovery=ON\nsync_binlog=1\ninnodb_flush_log_at_trx_commit=1\nread_only=%s\nbind_address=127.0.0.1\nskip_name_resolve=ON\n", layout.DataDir, d.Port, layout.Socket, layout.PID, layout.Log, d.Replication.NodeID, filepath.Join(layout.DataDir, "mysql-bin"), filepath.Join(layout.DataDir, "relay-bin"), readOnlyValue)
+}
+
+func addLocalMariaDBReplica(pn *plan.Plan, d config.Database, p platform.Platform) {
+	layout := addMariaDBInstanceService(pn, d, p, true)
+
+	dump := plan.Cmd("Seed MariaDB replica from local primary", "mariadb-dump", true,
+		"--protocol=socket", "--all-databases", "--single-transaction", "--routines", "--events", "--triggers", "--flush-privileges", "--master-data=2", "--gtid", "--result-file="+layout.Seed)
+	dump.UnlessCommand, dump.UnlessArgs = "test", []string{"-e", layout.SeedMarker}
+	pn.Add(dump)
+	load := plan.Cmd("Load primary snapshot into MariaDB replica", "mariadb", true, "--protocol=socket", "--socket="+layout.Socket)
+	load.Input = fmt.Sprintf("SOURCE %s;\nFLUSH PRIVILEGES;\n", layout.Seed)
+	load.UnlessCommand, load.UnlessArgs = "test", []string{"-e", layout.SeedMarker}
+	pn.Add(load)
+	mark := plan.Cmd("Mark MariaDB replica snapshot loaded", "touch", true, layout.SeedMarker)
+	mark.UnlessCommand, mark.UnlessArgs = "test", []string{"-e", layout.SeedMarker}
+	pn.Add(mark)
+	cleanup := plan.Cmd("Remove temporary MariaDB replica snapshot", "unlink", true, layout.Seed)
+	cleanup.UnlessCommand, cleanup.UnlessArgs = "test", []string{"!", "-e", layout.Seed}
+	pn.Add(cleanup)
+
+	primaryPort := d.Replication.PrimaryPort
+	if primaryPort == 0 {
+		primaryPort = 3306
+	}
+	input := fmt.Sprintf("STOP REPLICA;\nCHANGE MASTER TO MASTER_HOST='%s', MASTER_USER='%s', MASTER_PASSWORD='${%s}', MASTER_PORT=%d, MASTER_USE_GTID=slave_pos;\nSTART REPLICA;\n", d.Replication.PrimaryHost, d.Replication.User, d.Replication.PasswordEnv, primaryPort)
+	attach := plan.Cmd("Attach independent MariaDB replica to local primary", "mariadb", true, "--protocol=socket", "--socket="+layout.Socket)
+	attach.Input, attach.Sensitive, attach.SQLSecrets = input, true, true
+	pn.Add(attach)
+	pn.Warn("Same-machine replication keeps database processes independent, but it does not protect against host, disk, kernel, or power failure")
+}
+
+func addMariaDBInstanceService(pn *plan.Plan, d config.Database, p platform.Platform, readOnly bool) mariaDBInstanceLayout {
+	layout := mariaDBReplicaLayout(d)
+	serverBinary := "/usr/sbin/mariadbd"
+	if p.Family == "rhel" {
+		serverBinary = "/usr/libexec/mariadbd"
+	}
+	conf := mariaDBInstanceConfig(d, readOnly)
+	unit := fmt.Sprintf("[Unit]\nDescription=Poorman MariaDB replica on port %d\nWants=network-online.target\nAfter=network-online.target mariadb.service\n\n[Service]\nType=simple\nUser=mysql\nGroup=mysql\nRuntimeDirectory=%s\nRuntimeDirectoryMode=0750\nExecStart=%s --defaults-file=%s\nRestart=on-failure\nRestartSec=5s\nTimeoutStopSec=900s\nLimitNOFILE=32768\n\n[Install]\nWantedBy=multi-user.target\n", d.Port, layout.Service, serverBinary, layout.Config)
+
+	pn.Add(plan.Dir("Create MariaDB replica data directory", layout.DataDir, "mysql", 0o700))
+	pn.Add(plan.Dir("Create MariaDB replica runtime directory", layout.RuntimeDir, "mysql", 0o750))
+	pn.Add(plan.ManagedFile("Configure independent MariaDB instance", layout.Config, conf, "root", 0o644))
+	initialize := plan.Cmd("Initialize MariaDB replica data directory", "mariadb-install-db", true, "--defaults-file="+layout.Config, "--user=mysql", "--datadir="+layout.DataDir, "--skip-test-db")
+	initialize.UnlessCommand, initialize.UnlessArgs = "test", []string{"-d", filepath.Join(layout.DataDir, "mysql")}
+	pn.Add(initialize)
+	pn.Add(plan.ManagedFile("Install independent MariaDB replica service", layout.Unit, unit, "root", 0o644))
+	pn.Add(plan.Cmd("Reload systemd for MariaDB replica", "systemctl", true, "daemon-reload"))
+	pn.Add(plan.Cmd("Enable independent MariaDB replica service", "systemctl", true, "enable", layout.Service))
+	pn.Add(plan.Cmd("Restart independent MariaDB replica service", "systemctl", true, "restart", layout.Service))
+	return layout
+}
+
+func addPromotedMariaDBPrimary(pn *plan.Plan, d config.Database, p platform.Platform) {
+	layout := addMariaDBInstanceService(pn, d, p, false)
+	clientArgs := []string{"--protocol=socket", "--socket=" + layout.Socket}
+	if d.Name != "" && d.User != "" {
+		input := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;\nCREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'localhost' IDENTIFIED BY '${%s}';\nGRANT ALL ON `%s`.* TO '%s'@'localhost';\nFLUSH PRIVILEGES;\n", d.Name, d.User, d.PasswordEnv, d.User, d.PasswordEnv, d.Name, d.User)
+		step := plan.Cmd("Update application database on promoted MariaDB instance", "mariadb", true, clientArgs...)
+		step.Input, step.Sensitive, step.SQLSecrets = input, true, true
+		step.TimeoutSeconds = 60
+		pn.Add(step)
+	}
+	input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", d.Replication.User, d.Replication.PasswordEnv, d.Replication.User)
+	step := plan.Cmd("Update replication user on promoted MariaDB instance", "mariadb", true, clientArgs...)
+	step.Input, step.Sensitive, step.SQLSecrets = input, true, true
+	pn.Add(step)
+	pn.Warn("This promoted MariaDB instance remains an independent service; redirect clients to its configured port")
+}
+
 func mariaDBReplicationConfigPath(p platform.Platform) string {
 	if p.Family == "debian" {
 		return "/etc/mysql/mariadb.conf.d/90-poorman-replication.cnf"
@@ -461,7 +589,7 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if service == "openlitespeed" {
 		service = "lsws"
 	}
-	writableWordPress := anyWordPress(c) && (c.Database == nil || c.Database.Role != "replica")
+	writableWordPress := anyWordPress(c) && wordpressInitializationAllowed(c)
 	if writableWordPress {
 		download := plan.Cmd("Download wp-cli", "curl", true, "-fsSL", "-o", "/tmp/poorman-wp-cli.phar", "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar")
 		download.UnlessCommand, download.UnlessArgs = "wp", []string{"--info"}
@@ -506,7 +634,7 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 		}
 	}
 	if anyWordPress(c) && !writableWordPress {
-		pn.Warn("Skipped WordPress download, configuration, and installation because database.role=replica is read-only")
+		pn.Warn("Skipped WordPress initialization because this database is a replica or promoted independent instance")
 	}
 	pn.Add(plan.Cmd("Validate "+c.WebServer.Provider+" configuration", validationCommand(c.WebServer.Provider), true, validationArgs(c.WebServer.Provider)...))
 	pn.Add(restartService(p, service))
@@ -648,23 +776,40 @@ func addBackups(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if !c.Backups.Enabled {
 		return
 	}
-	pn.Add(plan.Dir("Create backup destination", c.Backups.Destination, "root", 0o700))
+	destination := c.Backups.Destination
+	scriptPath := "/usr/local/sbin/poorman-backup"
+	cronPath := "/etc/cron.d/poorman-backup"
+	sites := c.Sites
+	managedMariaDBInstance := c.Database != nil && isManagedMariaDBInstance(*c.Database)
+	if managedMariaDBInstance {
+		layout := mariaDBReplicaLayout(*c.Database)
+		destination = filepath.Join(destination, layout.Service)
+		scriptPath += "-" + layout.Service
+		cronPath += "-" + layout.Service
+		// The primary configuration owns same-host website backups. This
+		// instance-specific job protects only the independent replica data.
+		sites = nil
+	}
+	pn.Add(plan.Dir("Create backup destination", destination, "root", 0o700))
 	var database string
 	if c.Database != nil {
 		if c.Database.Provider == "postgresql" {
 			database = "sudo -u postgres pg_dumpall | gzip > \"$DEST/database.sql.gz\""
+		} else if managedMariaDBInstance {
+			layout := mariaDBReplicaLayout(*c.Database)
+			database = fmt.Sprintf("mariadb-dump --protocol=socket --socket=%s --all-databases --single-transaction | gzip > \"$DEST/database.sql.gz\"", shellQuote(layout.Socket))
 		} else {
 			database = "mariadb-dump --all-databases --single-transaction | gzip > \"$DEST/database.sql.gz\""
 		}
 	}
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\nDEST=%q/$(date +%%F-%%H%%M%%S)\ninstall -d -m 700 \"$DEST\"\n%s\n", c.Backups.Destination, database)
-	for _, s := range c.Sites {
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\nDEST=%q/$(date +%%F-%%H%%M%%S)\ninstall -d -m 700 \"$DEST\"\n%s\n", destination, database)
+	for _, s := range sites {
 		script += fmt.Sprintf("tar -C %q -czf \"$DEST/%s-files.tar.gz\" .\n", s.Root, s.Domain)
 	}
-	script += "find " + shellQuote(c.Backups.Destination) + " -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf -- {} +\n"
-	pn.Add(plan.ManagedFile("Install backup script", "/usr/local/sbin/poorman-backup", script, "root", 0o700))
-	cron := c.Backups.Schedule + " root /usr/local/sbin/poorman-backup\n"
-	pn.Add(plan.ManagedFile("Schedule backups", "/etc/cron.d/poorman-backup", cron, "root", 0o600))
+	script += "find " + shellQuote(destination) + " -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf -- {} +\n"
+	pn.Add(plan.ManagedFile("Install backup script", scriptPath, script, "root", 0o700))
+	cron := c.Backups.Schedule + " root " + scriptPath + "\n"
+	pn.Add(plan.ManagedFile("Schedule backups", cronPath, cron, "root", 0o600))
 }
 
 func enableService(p platform.Platform, service string) plan.Step {
@@ -722,6 +867,15 @@ func anyWordPress(c config.Config) bool {
 		}
 	}
 	return false
+}
+func wordpressInitializationAllowed(c config.Config) bool {
+	if c.Database == nil {
+		return true
+	}
+	if c.Database.Role == "replica" {
+		return false
+	}
+	return !isManagedMariaDBInstance(*c.Database)
 }
 func hasSFTPOnly(c config.Config) bool {
 	for _, u := range c.Access.Users {

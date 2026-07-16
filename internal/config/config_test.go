@@ -68,11 +68,19 @@ func TestSameMachinePostgresReplicaRequiresExplicitPort(t *testing.T) {
 	}
 }
 
-func TestRejectsSameMachineMariaDBReplica(t *testing.T) {
+func TestAcceptsIndependentSameMachineMariaDBReplica(t *testing.T) {
+	c := Default()
+	c.Database = &Database{Provider: "mariadb", Role: "replica", Port: 3307, DataDir: "/var/lib/mysql/poorman-replica-3307", Replication: Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSameMachineMariaDBReplicaRequiresSeparateDataDir(t *testing.T) {
 	c := Default()
 	c.Database = &Database{Provider: "mariadb", Role: "replica", Port: 3307, Replication: Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2}}
 	if err := c.Validate(); err == nil {
-		t.Fatal("expected same-machine MariaDB replica validation error")
+		t.Fatal("expected missing MariaDB replica data directory error")
 	}
 }
 

@@ -50,7 +50,7 @@ poorman init                        write a complete starter configuration
 poorman plan [-f FILE]              preview every action
 poorman apply [-f FILE] [--yes]     apply locally
 poorman status [-f FILE]            run health checks
-poorman backup [--yes]              run the installed backup job now
+poorman backup [-f FILE] [--yes]    run that configuration's backup job now
 poorman replica status [-f FILE]    show replication health/lag data
 poorman replica promote [-f FILE]   promote a configured replica
 poorman replica setup [-f FILE] [--from PRIMARY_FILE]
@@ -82,9 +82,13 @@ Secret-backed command input is redacted from plans. SQL secrets are escaped befo
 
 Create one configuration per database node. Set `database.role` to `primary` or `replica`, give every MariaDB node a unique `node_id`, and restrict the primary with `allowed_cidr`. See [PostgreSQL primary](examples/postgresql-primary.json) and [PostgreSQL replica](examples/postgresql-replica.json).
 
-For a PostgreSQL primary and replica on the same machine, create a separate replica file with `poorman replica setup -f replica.json --from primary.json`, then answer yes when guided setup asks whether the primary is local. It uses `127.0.0.1`, separate ports (`5432`/`5433` by default), a dedicated replica data directory, and a separate instance start command. MariaDB replicas currently require a separate host because poorman manages one MariaDB service and configuration per machine.
+For a primary and replica on the same machine, create a separate replica file with `poorman replica setup -f replica.json --from primary.json`, then answer yes when guided setup asks whether the primary is local. PostgreSQL uses separate ports and a dedicated data directory. MariaDB on Debian/Ubuntu and RHEL-family systems gets its own data directory, config, socket, PID, log, port, systemd service, seed snapshot, and instance-specific backup job; see [the same-host MariaDB replica example](examples/mariadb-replica-same-host.json). Apply the primary configuration first so its replication account and binlogs exist, then apply the replica configuration.
+
+The two database processes are deliberately not coupled with a systemd `Requires=` or `PartOf=` relationship, so one database service crashing does not stop the other. Same-host replication is process-level redundancy only: the primary and replica still share the machine, storage hardware, kernel, and power source. Use a separate host for host-level availability. Same-host MariaDB service generation currently requires systemd; Alpine/OpenRC needs a separate replica host.
 
 Promotion is deliberately guarded. Before running it, fence the failed primary to prevent split brain. `poorman replica promote` requires typing `PROMOTE` unless `--yes` is supplied.
+
+For a promoted same-host MariaDB instance, changing `database.role` to `primary` keeps poorman attached to the independent service and makes its managed configuration writable. Client redirection is still explicit; local applications must be pointed at the promoted instance's configured port.
 
 PostgreSQL still requires the precise `pg_hba.conf` rule printed in the plan. The tool does not guess trusted networks or edit a version-dependent authentication file blindly.
 

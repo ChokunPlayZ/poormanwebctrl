@@ -44,7 +44,7 @@ func TestGuidedMariaDBReplicaDerivesDistinctRemoteTopology(t *testing.T) {
 	}
 }
 
-func TestGuidedMariaDBReplicaRejectsUnsupportedSameMachineLayout(t *testing.T) {
+func TestGuidedMariaDBReplicaCreatesIndependentSameMachineLayout(t *testing.T) {
 	dir := t.TempDir()
 	primaryPath := filepath.Join(dir, "primary.json")
 	replicaPath := filepath.Join(dir, "replica.json")
@@ -60,11 +60,17 @@ func TestGuidedMariaDBReplicaRejectsUnsupportedSameMachineLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	in := bytes.NewBufferString("\n\n\ny\n")
+	in := bytes.NewBufferString("\n\n\ny\n\n\n\n\n\n")
 	var out bytes.Buffer
-	err := Run([]string{"replica", "setup", "-f", replicaPath, "--from", primaryPath}, in, &out, &out)
-	if err == nil {
-		t.Fatal("expected same-machine MariaDB setup to be rejected")
+	if err := Run([]string{"replica", "setup", "-f", replicaPath, "--from", primaryPath}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	replica, err := config.Load(replicaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replica.Database.Port != 3307 || replica.Database.DataDir != "/var/lib/mysql/poorman-replica-3307" {
+		t.Fatalf("database = %#v, want independent same-machine MariaDB layout", replica.Database)
 	}
 }
 
