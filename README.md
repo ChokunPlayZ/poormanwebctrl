@@ -17,6 +17,7 @@
 - Scheduled site/database backups and on-demand backups
 - Local service, configuration, and virtual-host health checks
 - TUI firewall management: status, policy preview/apply, and guarded disable
+- TUI long-term operations: host resource stats, service logs, and backup inventory
 
 ## Build and start
 
@@ -40,6 +41,8 @@ poorman backup [--yes]              run the installed backup job now
 poorman replica status [-f FILE]    show replication health/lag data
 poorman replica promote [-f FILE]   promote a configured replica
 ```
+
+When a configuration already exists, `poorman tui` opens the operations dashboard. Choose **long-term operations** for read-only host capacity, recent systemd journal logs for configured services, and the files currently present in the configured backup destination.
 
 ## Secrets
 

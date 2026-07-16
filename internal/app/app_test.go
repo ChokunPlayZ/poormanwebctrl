@@ -47,4 +47,7 @@ func TestTUIShowsOperationsForExistingConfig(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("Firewall management")) {
 		t.Fatal("firewall management option not shown")
 	}
+	if !bytes.Contains(out.Bytes(), []byte("long-term operations")) {
+		t.Fatal("long-term operations option not shown")
+	}
 }

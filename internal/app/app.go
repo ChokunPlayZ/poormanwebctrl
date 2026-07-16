@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 	"github.com/chokunplayz/poormanwebctrl/internal/executor"
 	"github.com/chokunplayz/poormanwebctrl/internal/health"
+	"github.com/chokunplayz/poormanwebctrl/internal/ops"
 	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 	"github.com/chokunplayz/poormanwebctrl/internal/platform"
 	"github.com/chokunplayz/poormanwebctrl/internal/provider"
@@ -242,12 +244,119 @@ func tuiDashboard(path string, in io.Reader, ui *terminalUI) error {
 			if err := firewallTUI(path, reader, ui); err != nil {
 				ui.warn("Firewall operation unavailable: " + err.Error())
 			}
+		case "7":
+			if err := operationsTUI(c, reader, ui); err != nil {
+				ui.warn("Operations unavailable: " + err.Error())
+			}
 		case "0", "q", "Q":
 			return nil
 		default:
 			ui.warn("Unknown selection.")
 		}
 	}
+}
+
+func operationsTUI(c config.Config, reader *bufio.Reader, ui *terminalUI) error {
+	services := configuredServices(c)
+	for {
+		ui.clear()
+		ui.brand("Long-term operations", "Inspect the host and keep services healthy")
+		ui.panel("READ-ONLY", "These views do not change server state")
+		ui.panel("ACTIONS", "1  host resource stats\n2  recent service logs\n3  backup inventory\n0  back")
+		switch prompt(reader, ui, "Select action", "1") {
+		case "1":
+			ui.clear()
+			ui.brand("Host resource stats", "A point-in-time view of capacity and service failures")
+			if err := ops.Stats(context.Background(), ui); err != nil {
+				ui.warn(err.Error())
+			}
+			pause(reader, ui)
+		case "2":
+			ui.clear()
+			ui.brand("Service logs", "Recent entries from the system journal")
+			for i, service := range services {
+				fmt.Fprintf(ui, "%d  %s\n", i+1, service)
+			}
+			fmt.Fprintln(ui, "s  system boot log\n0  back")
+			choice := prompt(reader, ui, "Service", "1")
+			if choice == "0" {
+				continue
+			}
+			service := ""
+			if choice == "s" || choice == "S" {
+				service = "system"
+			} else if n, err := parseChoice(choice, len(services)); err == nil {
+				service = services[n-1]
+			} else {
+				ui.warn("Unknown service.")
+				pause(reader, ui)
+				continue
+			}
+			lineCount := prompt(reader, ui, "Lines", "50")
+			lines := 50
+			if n, err := parsePositive(lineCount); err == nil {
+				lines = n
+			}
+			if err := ops.Logs(context.Background(), service, lines, ui); err != nil {
+				ui.warn(err.Error())
+			}
+			pause(reader, ui)
+		case "3":
+			ui.clear()
+			ui.brand("Backup inventory", "Review artifacts produced by the configured backup job")
+			ui.muted("Destination: " + c.Backups.Destination)
+			if err := ops.BackupFiles(context.Background(), c.Backups.Destination, ui); err != nil {
+				ui.warn(err.Error())
+			}
+			pause(reader, ui)
+		case "0", "q", "Q":
+			return nil
+		default:
+			ui.warn("Unknown selection.")
+		}
+	}
+}
+
+func configuredServices(c config.Config) []string {
+	services := []string{webServiceName(c.WebServer.Provider)}
+	if c.Database != nil {
+		services = append(services, c.Database.Provider)
+	}
+	if c.Access.FTP.Enabled {
+		services = append(services, "vsftpd")
+	}
+	return services
+}
+
+func webServiceName(providerName string) string {
+	switch providerName {
+	case "apache":
+		return "apache2"
+	case "openlitespeed":
+		return "lsws"
+	default:
+		return "nginx"
+	}
+}
+
+func parseChoice(value string, max int) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 || n > max {
+		return 0, fmt.Errorf("invalid choice")
+	}
+	return n, nil
+}
+
+func parsePositive(value string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 || n > 500 {
+		return 0, fmt.Errorf("invalid line count")
+	}
+	return n, nil
+}
+
+func pause(reader *bufio.Reader, ui *terminalUI) {
+	prompt(reader, ui, "Press enter to continue", "")
 }
 
 func firewallTUI(path string, in io.Reader, ui *terminalUI) error {
@@ -385,7 +494,7 @@ func (ui *terminalUI) dashboard(c config.Config, path string) {
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s (%s)\nsite      %s\nconfig    %s", c.WebServer.Provider, db, role, site, path))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
-	ui.panel("ACTIONS", "1  preview plan          4  run backup\n2  apply configuration    5  replication status\n3  health status           6  Firewall management\n0  exit")
+	ui.panel("ACTIONS", "1  preview plan          5  replication status\n2  apply configuration    6  Firewall management\n3  health status           7  long-term operations\n4  run backup\n0  exit")
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
 }
 

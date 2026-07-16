@@ -51,4 +51,4 @@ The v1 surface covers local installation, configuration, inspection, backup, and
 - rolling upgrades and automatic failover controllers;
 - a full-screen dashboard beyond the guided TUI.
 
-Those are intentionally not claimed as implemented.
+Those are intentionally not claimed as implemented. The guided TUI now includes a read-only long-term operations area for host stats, recent service logs, and backup inventory; it does not yet persist time-series metrics or provide remote/multi-host management.
