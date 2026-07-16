@@ -317,10 +317,12 @@ func TestNormalizeReplicaDatabaseResetsTopologyWhenProviderChanges(t *testing.T)
 func TestTUIReplicaSetupKeepsDashboardInputFlow(t *testing.T) {
 	primaryPath := filepath.Join(t.TempDir(), "primary.json")
 	replicaPath := filepath.Join(t.TempDir(), "replica.json")
-	if err := config.WriteDefault(primaryPath); err != nil {
+	primary := config.Default()
+	primary.Database.Provider = "postgresql"
+	if err := config.Write(primaryPath, primary); err != nil {
 		t.Fatal(err)
 	}
-	input := "10\n" + replicaPath + "\npostgresql\n\n\nn\n\n\n\n\nn\nn\n0\n"
+	input := "10\n" + replicaPath + "\n\n\n\nn\n\n\n\n\n\nn\nn\n0\n"
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
 		t.Fatal(err)
@@ -334,6 +336,9 @@ func TestTUIReplicaSetupKeepsDashboardInputFlow(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("Replica configuration is ready")) {
 		t.Fatal("TUI did not return to the replica setup handoff")
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Apply the primary, then the replica now?")) {
+		t.Fatal("TUI offered to apply the replica without applying the primary first")
 	}
 	if !bytes.Contains(out.Bytes(), []byte("config    "+replicaPath)) {
 		t.Fatal("dashboard did not switch to the saved replica configuration")

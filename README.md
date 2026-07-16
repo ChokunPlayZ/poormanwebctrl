@@ -63,7 +63,7 @@ Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains
 
 Choose **Stack settings** to adjust the web server, database and replication role, TLS email/enabled state, firewall, and backup destination/schedule after setup.
 
-During a new guided setup, the database section asks for `standalone`, `primary`, or `replica`. Primary setup collects the replication network and credentials; replica setup collects the primary host, ports, replication credentials, and the PostgreSQL data directory or MariaDB node ID. Use `poorman replica setup` (or **guided replica setup** in the dashboard) to configure a replica on an existing stack.
+During a new guided setup, the database section asks for `standalone`, `primary`, or `replica`. Primary setup collects the replication network and credentials; replica setup collects the primary host, ports, replication credentials, and the PostgreSQL data directory or MariaDB node ID. Use `poorman replica setup` (or **guided replica setup** in the dashboard) to configure a replica on an existing stack. When `--from` points to a standalone stack, the wizard now saves both sides: it promotes the source file to `primary` with matching replication credentials and writes the independent `replica` file.
 
 ## Secrets
 

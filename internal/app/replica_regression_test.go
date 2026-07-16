@@ -3,10 +3,89 @@ package app
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 )
+
+func TestGuidedMariaDBReplicaPromotesAndSavesStandaloneSource(t *testing.T) {
+	dir := t.TempDir()
+	primaryPath := filepath.Join(dir, "poorman.json")
+	replicaPath := filepath.Join(dir, "replica.json")
+	primary := config.Default()
+	primary.Database = &config.Database{
+		Provider:    "mariadb",
+		Role:        "standalone",
+		Name:        "mpowerbattery_main",
+		User:        "mpowerbattery",
+		PasswordEnv: "POORMAN_DB_PASSWORD",
+	}
+	if err := config.Write(primaryPath, primary); err != nil {
+		t.Fatal(err)
+	}
+
+	in := bytes.NewBufferString("\n\n\ny\n\n\n\n\n\n")
+	var out bytes.Buffer
+	if err := Run([]string{"replica", "setup", "-f", replicaPath, "--from", primaryPath}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	savedPrimary, err := config.Load(primaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedPrimary.Database.Role != "primary" {
+		t.Fatalf("source role = %q, want primary", savedPrimary.Database.Role)
+	}
+	wantPrimaryReplication := config.Replication{
+		User:        "replicator",
+		PasswordEnv: "POORMAN_REPLICATION_PASSWORD",
+		AllowedCIDR: "127.0.0.1/32",
+		NodeID:      1,
+	}
+	if savedPrimary.Database.Replication != wantPrimaryReplication {
+		t.Fatalf("source replication = %#v, want %#v", savedPrimary.Database.Replication, wantPrimaryReplication)
+	}
+	if savedPrimary.Database.Name != "mpowerbattery_main" || savedPrimary.Database.User != "mpowerbattery" {
+		t.Fatalf("source application database settings were changed: %#v", savedPrimary.Database)
+	}
+
+	replica, err := config.Load(replicaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replica.Database.Role != "replica" || replica.Database.Port != 3307 || replica.Database.DataDir != "/var/lib/mysql/poorman-replica-3307" {
+		t.Fatalf("replica database = %#v, want independent local instance", replica.Database)
+	}
+	if replica.Database.Replication.NodeID != 2 || replica.Database.Replication.AllowedCIDR != "" {
+		t.Fatalf("replica topology = %#v", replica.Database.Replication)
+	}
+	if !strings.Contains(out.String(), "Primary configuration saved to "+primaryPath) ||
+		!strings.Contains(out.String(), "1. poorman apply -f "+primaryPath) ||
+		!strings.Contains(out.String(), "2. poorman apply -f "+replicaPath) {
+		t.Fatalf("setup did not show both saved configurations and apply order:\n%s", out.String())
+	}
+
+	// A rerun must also repair a source left standalone by an older version,
+	// even when the replica target file already exists.
+	savedPrimary.Database.Role = "standalone"
+	savedPrimary.Database.Replication = config.Replication{}
+	if err := config.Write(primaryPath, savedPrimary); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := Run([]string{"replica", "setup", "-f", replicaPath, "--from", primaryPath}, bytes.NewBufferString("\n\n\ny\n\n\n\n\n\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	repairedPrimary, err := config.Load(primaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repairedPrimary.Database.Role != "primary" || repairedPrimary.Database.Replication != wantPrimaryReplication {
+		t.Fatalf("rerun did not repair existing source: %#v", repairedPrimary.Database)
+	}
+}
 
 func TestGuidedMariaDBReplicaDerivesDistinctRemoteTopology(t *testing.T) {
 	dir := t.TempDir()

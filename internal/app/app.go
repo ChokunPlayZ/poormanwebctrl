@@ -386,8 +386,23 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	c := config.Default()
+	var sourceConfig *config.Config
 	var err error
 	loadedTarget := false
+	if *from != "" && sameConfigPath(*path, *from) {
+		return fmt.Errorf("replica configuration must be different from the primary configuration")
+	}
+	if *from != "" {
+		source, loadErr := config.Load(*from)
+		if loadErr != nil {
+			return loadErr
+		}
+		if source.Database != nil && source.Database.Role == "replica" {
+			return fmt.Errorf("--from must reference a standalone or primary database configuration")
+		}
+		sourceConfig = &source
+		c = source
+	}
 	if _, statErr := os.Stat(*path); statErr == nil {
 		loadedTarget = true
 		c, err = config.Load(*path)
@@ -396,11 +411,6 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
-	} else if *from != "" {
-		c, err = config.Load(*from)
-		if err != nil {
-			return err
-		}
 	}
 	ui := newTerminalUI(out)
 	reader := inputReader(in)
@@ -410,6 +420,9 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		providerName = c.Database.Provider
 	}
 	providerName = strings.ToLower(prompt(reader, ui, "Database (mariadb/postgresql)", providerName))
+	if sourceConfig != nil && sourceConfig.Database != nil && sourceConfig.Database.Provider != providerName {
+		return fmt.Errorf("replica database provider %q must match source provider %q", providerName, sourceConfig.Database.Provider)
+	}
 	database := &config.Database{Provider: providerName, Role: "replica", PasswordEnv: "POORMAN_DB_PASSWORD"}
 	if c.Database != nil {
 		copy := *c.Database
@@ -420,17 +433,88 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	c.Database = database
+	if err := c.Validate(); err != nil {
+		return fmt.Errorf("replica configuration: %w", err)
+	}
+	if sourceConfig != nil {
+		updatedSource, err := configureReplicaSource(*sourceConfig, database, reader, ui)
+		if err != nil {
+			return err
+		}
+		if err := config.Write(*from, updatedSource); err != nil {
+			return fmt.Errorf("save primary configuration: %w", err)
+		}
+	}
 	if err := config.Write(*path, c); err != nil {
-		return err
+		return fmt.Errorf("save replica configuration: %w", err)
 	}
 	if !loadedTarget && *from != "" {
 		if err := copyConfigSecrets(*from, *path, c); err != nil {
 			return err
 		}
 	}
-	ui.success(fmt.Sprintf("Replica configuration saved to %s", *path))
-	ui.muted(fmt.Sprintf("Preview it with: poorman plan -f %s", *path))
+	if sourceConfig != nil {
+		ui.success(fmt.Sprintf("Primary configuration saved to %s", *from))
+		ui.success(fmt.Sprintf("Replica configuration saved to %s", *path))
+		ui.muted("Apply the configurations in this order:")
+		ui.muted(fmt.Sprintf("1. poorman apply -f %s", *from))
+		ui.muted(fmt.Sprintf("2. poorman apply -f %s", *path))
+	} else {
+		ui.success(fmt.Sprintf("Replica configuration saved to %s", *path))
+		ui.muted(fmt.Sprintf("Preview it with: poorman plan -f %s", *path))
+	}
 	return nil
+}
+
+func sameConfigPath(left, right string) bool {
+	leftPath, leftErr := filepath.Abs(left)
+	rightPath, rightErr := filepath.Abs(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(leftPath) == filepath.Clean(rightPath)
+}
+
+// configureReplicaSource persists the other half of a generated topology. A
+// replica cloned from a standalone stack is unusable until that source is also
+// configured as a primary with matching credentials.
+func configureReplicaSource(source config.Config, replica *config.Database, reader *bufio.Reader, ui *terminalUI) (config.Config, error) {
+	primary := config.Database{Provider: replica.Provider, PasswordEnv: replica.PasswordEnv}
+	if source.Database != nil {
+		primary = *source.Database
+	}
+	if primary.Role == "replica" {
+		return config.Config{}, fmt.Errorf("--from must reference a standalone or primary database configuration")
+	}
+	wasPrimary := primary.Role == "primary"
+	primary.Provider = replica.Provider
+	primary.Role = "primary"
+	primary.Replication.User = replica.Replication.User
+	primary.Replication.PasswordEnv = replica.Replication.PasswordEnv
+	primary.Replication.PrimaryHost = ""
+	primary.Replication.PrimaryPort = 0
+
+	if !wasPrimary {
+		if isLoopbackAddress(replica.Replication.PrimaryHost) {
+			primary.Replication.AllowedCIDR = "127.0.0.1/32"
+		} else {
+			primary.Replication.AllowedCIDR = prompt(reader, ui, "Replica network CIDR allowed by primary", defaultValue(primary.Replication.AllowedCIDR, "10.20.0.0/24"))
+		}
+	}
+	if replica.Provider == "mariadb" {
+		primary.Replication.Slot = ""
+		if primary.Replication.NodeID < 1 {
+			primary.Replication.NodeID = 1
+		}
+		if primary.Replication.NodeID == replica.Replication.NodeID {
+			return config.Config{}, fmt.Errorf("MariaDB primary and replica must use different node IDs")
+		}
+	} else {
+		primary.Replication.NodeID = 0
+		primary.Replication.Slot = replica.Replication.Slot
+	}
+	source.Database = &primary
+	if err := source.Validate(); err != nil {
+		return config.Config{}, fmt.Errorf("primary configuration: %w", err)
+	}
+	return source, nil
 }
 
 // normalizeReplicaDatabase keeps shared credentials while removing topology
@@ -459,6 +543,10 @@ func normalizeReplicaDatabase(database *config.Database, providerName string) {
 		}
 	}
 	database.Role = "replica"
+	database.Replication.AllowedCIDR = ""
+	if providerName == "mariadb" {
+		database.Replication.Slot = ""
+	}
 }
 
 func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
@@ -559,17 +647,24 @@ func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufi
 	if err := guidedReplicaSetup([]string{"-f", replicaPath, "--from", primaryPath}, reader, ui); err != nil {
 		return "", err
 	}
-	if yesNo(prompt(reader, ui, "Preview the replica plan now? (Y/n)", "y")) {
+	if yesNo(prompt(reader, ui, "Preview the primary and replica plans now? (Y/n)", "y")) {
+		if err := planCommand([]string{"-f", primaryPath}, ui); err != nil {
+			return replicaPath, err
+		}
 		if err := planCommand([]string{"-f", replicaPath}, ui); err != nil {
 			return replicaPath, err
 		}
 	}
-	if yesNo(prompt(reader, ui, "Apply the replica configuration now? (y/N)", "n")) {
+	if yesNo(prompt(reader, ui, "Apply the primary, then the replica now? (y/N)", "n")) {
 		// The guided prompt is already the user's confirmation. Passing --yes
 		// avoids asking for a second confirmation and consuming the next TUI input.
+		if err := applyCommand(ctx, []string{"-f", primaryPath, "--yes"}, reader, ui, ui); err != nil {
+			return replicaPath, err
+		}
 		return replicaPath, applyCommand(ctx, []string{"-f", replicaPath, "--yes"}, reader, ui, ui)
 	}
-	ui.muted(fmt.Sprintf("Replica configuration is ready: poorman apply -f %s", replicaPath))
+	ui.muted(fmt.Sprintf("Replica configuration is ready; apply the primary first: poorman apply -f %s", primaryPath))
+	ui.muted(fmt.Sprintf("Then apply the replica: poorman apply -f %s", replicaPath))
 	return replicaPath, nil
 }
 
