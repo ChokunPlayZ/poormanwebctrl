@@ -10,7 +10,6 @@ builds:
       - -s -w -X github.com/chokunplayz/poormanwebctrl/internal/app.version={{.Version}}
     goos:
       - linux
-      - darwin
     goarch:
       - amd64
       - arm64
