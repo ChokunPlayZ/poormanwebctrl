@@ -18,6 +18,57 @@ func TestDefaultIsValid(t *testing.T) {
 	if err := Default().Validate(); err != nil {
 		t.Fatal(err)
 	}
+	if got := Default().Backups.EffectiveRetentionDays(); got != 14 {
+		t.Fatalf("default backup retention = %d, want 14", got)
+	}
+}
+
+func TestS3BackupValidation(t *testing.T) {
+	c := Default()
+	c.Backups.RetentionDays = 30
+	c.Backups.Offsite = &OffsiteBackup{
+		Provider:      "s3",
+		Bucket:        "company-server-backups",
+		Prefix:        "production/web-01",
+		Region:        "ap-southeast-1",
+		Profile:       "backup-writer",
+		Endpoint:      "https://s3.ap-southeast-1.amazonaws.com",
+		RetentionDays: 90,
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Backups.Offsite.EffectiveRetentionDays(c.Backups.EffectiveRetentionDays()); got != 90 {
+		t.Fatalf("offsite retention = %d, want 90", got)
+	}
+}
+
+func TestS3BackupInheritsLocalRetention(t *testing.T) {
+	c := Default()
+	c.Backups.RetentionDays = 21
+	c.Backups.Offsite = &OffsiteBackup{Provider: "s3", Bucket: "company-server-backups"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Backups.Offsite.EffectiveRetentionDays(c.Backups.EffectiveRetentionDays()); got != 21 {
+		t.Fatalf("inherited offsite retention = %d, want 21", got)
+	}
+}
+
+func TestS3BackupRejectsUnsafeConfiguration(t *testing.T) {
+	tests := []OffsiteBackup{
+		{Provider: "ftp", Bucket: "company-server-backups"},
+		{Provider: "s3", Bucket: "Invalid_Bucket"},
+		{Provider: "s3", Bucket: "company-server-backups", Prefix: "../production"},
+		{Provider: "s3", Bucket: "company-server-backups", Endpoint: "https://user:secret@example.com"},
+	}
+	for _, offsite := range tests {
+		c := Default()
+		c.Backups.Offsite = &offsite
+		if err := c.Validate(); err == nil {
+			t.Errorf("expected validation error for %#v", offsite)
+		}
+	}
 }
 
 func TestPlainFTPRequiresExplicitRiskAcceptance(t *testing.T) {

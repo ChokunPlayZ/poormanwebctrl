@@ -3,10 +3,14 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 )
 
@@ -57,35 +61,57 @@ func TestApplyStopsBeforeNextStepWhenCanceled(t *testing.T) {
 	}
 }
 
-func TestApplyAllowsOnlyConfiguredFailureLines(t *testing.T) {
-	var out bytes.Buffer
-	operation := plan.Plan{Steps: []plan.Step{{
-		Description:         "validate configuration",
-		Kind:                plan.Command,
-		Command:             "sh",
-		Args:                []string{"-c", "printf 'known uid warning\\nknown gid warning\\n'; exit 1"},
-		AllowedFailureLines: []string{"known uid warning", "known gid warning"},
-	}}}
-
-	if err := Apply(t.Context(), operation, bytes.NewReader(nil), &out, &out); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(out.Bytes(), []byte("continuing")) {
-		t.Fatalf("output = %q, want non-fatal warning notice", out.String())
+func TestAppendOwnershipArgsSupportsDifferentOwnerAndGroup(t *testing.T) {
+	got := appendOwnershipArgs([]string{"-d"}, plan.Step{Owner: "nobody", Group: "nogroup"})
+	want := []string{"-d", "-o", "nobody", "-g", "nogroup"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ownership args = %#v, want %#v", got, want)
 	}
 }
 
-func TestApplyRejectsAdditionalFailureOutput(t *testing.T) {
+func TestReconcileManagedStateRemovesObsoleteOwnedFiles(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "managed.json")
+	configPath := filepath.Join(dir, "poorman.json")
+	obsolete := filepath.Join(dir, "poorman-old.conf")
+	if err := os.WriteFile(obsolete, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := managed.Service{
+		Key: managed.ServiceKey(configPath, "web"), ConfigPath: managed.ConfigKey(configPath), Kind: "web", Name: "nginx", Files: []string{obsolete},
+	}
+	inventory, err := managed.Marshal(managed.Inventory{Services: []managed.Service{previous}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, inventory, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := previous
+	current.Files = nil
+	desired, err := json.Marshal([]managed.Service{current})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var out bytes.Buffer
-	operation := plan.Plan{Steps: []plan.Step{{
-		Description:         "validate configuration",
-		Kind:                plan.Command,
-		Command:             "sh",
-		Args:                []string{"-c", "printf 'known uid warning\\nsyntax error\\n'; exit 1"},
-		AllowedFailureLines: []string{"known uid warning"},
-	}}}
+	step := plan.ReconcileManagedState("reconcile", statePath, configPath, string(desired))
+	if err := reconcileManagedState(t.Context(), step, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(obsolete); !os.IsNotExist(err) {
+		t.Fatalf("obsolete managed file still exists: %v", err)
+	}
+}
 
-	if err := Apply(t.Context(), operation, bytes.NewReader(nil), &out, &out); err == nil {
-		t.Fatal("expected additional validator error to remain fatal")
+func TestSafeManagedConfigPathRejectsBroadOrUnownedTargets(t *testing.T) {
+	for _, path := range []string{"/", "/etc/passwd", "/etc/nginx/nginx.conf", "/etc/nginx/conf.d/customer.conf", "/usr/local/lsws/conf/httpd_config.conf"} {
+		if safeManagedConfigPath(path) {
+			t.Errorf("unsafe path accepted: %s", path)
+		}
+	}
+	for _, path := range []string{"/etc/nginx/conf.d/poorman-example.conf", "/etc/apache2/sites-enabled/poorman-example.conf", "/etc/httpd/conf.d/poorman-example.conf", "/usr/local/lsws/conf/poorman.conf", "/usr/local/lsws/conf/vhosts/example.com/vhconf.conf"} {
+		if !safeManagedConfigPath(path) {
+			t.Errorf("managed config path rejected: %s", path)
+		}
 	}
 }

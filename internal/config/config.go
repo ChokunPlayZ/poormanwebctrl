@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -134,9 +135,24 @@ type Firewall struct {
 }
 
 type Backup struct {
-	Enabled     bool   `json:"enabled,omitempty"`
-	Destination string `json:"destination,omitempty"`
-	Schedule    string `json:"schedule,omitempty"`
+	Enabled       bool           `json:"enabled,omitempty"`
+	Destination   string         `json:"destination,omitempty"`
+	Schedule      string         `json:"schedule,omitempty"`
+	RetentionDays int            `json:"retention_days,omitempty"`
+	Offsite       *OffsiteBackup `json:"offsite,omitempty"`
+}
+
+// OffsiteBackup describes a second copy written after a local backup succeeds.
+// Authentication deliberately uses the AWS CLI credential chain so secrets do
+// not enter the poorman configuration or generated script.
+type OffsiteBackup struct {
+	Provider      string `json:"provider"`
+	Bucket        string `json:"bucket"`
+	Prefix        string `json:"prefix,omitempty"`
+	Region        string `json:"region,omitempty"`
+	Endpoint      string `json:"endpoint,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
 }
 
 var (
@@ -146,7 +162,30 @@ var (
 	charsetRE     = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 	domainRE      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 	envRE         = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	s3BucketRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	s3PrefixRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$`)
+	awsOptionRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 )
+
+const defaultBackupRetentionDays = 14
+
+// EffectiveRetentionDays keeps existing configurations compatible with the
+// original fixed 14-day cleanup while allowing new configs to override it.
+func (b Backup) EffectiveRetentionDays() int {
+	if b.RetentionDays > 0 {
+		return b.RetentionDays
+	}
+	return defaultBackupRetentionDays
+}
+
+// EffectiveRetentionDays inherits the local policy when the offsite policy is
+// omitted, so adding S3 does not silently retain objects forever.
+func (o OffsiteBackup) EffectiveRetentionDays(localDays int) int {
+	if o.RetentionDays > 0 {
+		return o.RetentionDays
+	}
+	return localDays
+}
 
 // ManagedDatabases returns the declarative database list while keeping old
 // single-database configurations fully compatible.
@@ -216,7 +255,7 @@ func Default() Config {
 		Sites:     []Site{{Domain: "example.com", Root: "/var/www/example.com", Owner: "webadmin", Runtime: "php"}},
 		TLS:       TLS{Enabled: true, Email: "admin@example.com"},
 		Firewall:  Firewall{Enabled: true},
-		Backups:   Backup{Enabled: true, Destination: "/var/backups/poorman", Schedule: "0 3 * * *"},
+		Backups:   Backup{Enabled: true, Destination: "/var/backups/poorman", Schedule: "0 3 * * *", RetentionDays: defaultBackupRetentionDays},
 	}
 }
 
@@ -505,8 +544,54 @@ func (c Config) Validate() error {
 		if len(strings.Fields(c.Backups.Schedule)) != 5 {
 			return fmt.Errorf("backup schedule must be a five-field cron expression")
 		}
+		if c.Backups.RetentionDays < 0 || c.Backups.RetentionDays > 36500 {
+			return fmt.Errorf("backup retention_days must be between 1 and 36500 when set")
+		}
+		if offsite := c.Backups.Offsite; offsite != nil {
+			if offsite.Provider != "s3" {
+				return fmt.Errorf("unsupported offsite backup provider %q", offsite.Provider)
+			}
+			if !validS3Bucket(offsite.Bucket) {
+				return fmt.Errorf("S3 backup requires a valid bucket name")
+			}
+			if offsite.Prefix != "" && (!s3PrefixRE.MatchString(offsite.Prefix) || strings.HasPrefix(offsite.Prefix, "/") || strings.Contains(offsite.Prefix, "//")) {
+				return fmt.Errorf("S3 backup prefix must be a relative path using letters, numbers, dot, underscore, dash, or slash")
+			}
+			for _, segment := range strings.Split(offsite.Prefix, "/") {
+				if segment == "." || segment == ".." {
+					return fmt.Errorf("S3 backup prefix cannot contain dot path segments")
+				}
+			}
+			if offsite.Region != "" && !awsOptionRE.MatchString(offsite.Region) {
+				return fmt.Errorf("S3 backup region is invalid")
+			}
+			if offsite.Profile != "" && !awsOptionRE.MatchString(offsite.Profile) {
+				return fmt.Errorf("S3 backup profile is invalid")
+			}
+			if offsite.Endpoint != "" && !validS3Endpoint(offsite.Endpoint) {
+				return fmt.Errorf("S3 backup endpoint must be an HTTP or HTTPS URL without credentials, query, or fragment")
+			}
+			if offsite.RetentionDays < 0 || offsite.RetentionDays > 36500 {
+				return fmt.Errorf("S3 backup retention_days must be between 1 and 36500 when set")
+			}
+		}
 	}
 	return nil
+}
+
+func validS3Bucket(bucket string) bool {
+	if !s3BucketRE.MatchString(bucket) || strings.Contains(bucket, "..") {
+		return false
+	}
+	return net.ParseIP(bucket) == nil
+}
+
+func validS3Endpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
+		return false
+	}
+	return u.RawQuery == "" && u.Fragment == ""
 }
 
 func isLoopbackHost(host string) bool {

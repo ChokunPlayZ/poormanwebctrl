@@ -23,6 +23,23 @@ func TestInputReaderPreservesExistingBuffer(t *testing.T) {
 	}
 }
 
+func TestConfigureBackupRetentionAndS3(t *testing.T) {
+	c := config.Default()
+	reader := bufio.NewReader(strings.NewReader("30\ny\ncompany-server-backups\nproduction/web-01\nap-southeast-1\nbackup-writer\nhttps://s3.example.com\n90\n"))
+	var out bytes.Buffer
+	configureBackupRetention(&c, reader, newTerminalUI(&out))
+	if c.Backups.RetentionDays != 30 || c.Backups.Offsite == nil {
+		t.Fatalf("backup settings = %#v", c.Backups)
+	}
+	offsite := c.Backups.Offsite
+	if offsite.Provider != "s3" || offsite.Bucket != "company-server-backups" || offsite.Prefix != "production/web-01" || offsite.Region != "ap-southeast-1" || offsite.Profile != "backup-writer" || offsite.Endpoint != "https://s3.example.com" || offsite.RetentionDays != 90 {
+		t.Fatalf("offsite backup settings = %#v", offsite)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEnsureDatabasePasswordPersistsGeneratedValue(t *testing.T) {
 	name := "POORMAN_TEST_GENERATED_DB_PASSWORD"
 	t.Setenv(name, "")

@@ -15,6 +15,10 @@ import (
 	"github.com/chokunplayz/poormanwebctrl/internal/platform"
 )
 
+const managedServerMessage = "This Webserver is managed via poorman CLI, any changes to the config made outside Poorman WILL BE OVERWRITTEN"
+
+const managedConfigHeader = "# Managed by poorman CLI. Changes made outside Poorman WILL BE OVERWRITTEN.\n"
+
 func Build(c config.Config, p platform.Platform) (plan.Plan, error) {
 	return build(c, p, "")
 }
@@ -36,8 +40,9 @@ func build(c config.Config, p platform.Platform, configPath string) (plan.Plan, 
 	result := plan.Plan{Platform: p.Distro}
 	packages := packageSet(c, p)
 	addPackageSteps(&result, p, packages)
+	addManagedMOTD(&result, p)
 	if configPath != "" {
-		services := managed.DesiredServices(c, configPath)
+		services := desiredManagedServices(c, p, configPath)
 		content, err := json.Marshal(services)
 		if err != nil {
 			return plan.Plan{}, fmt.Errorf("encode managed service inventory: %w", err)
@@ -60,7 +65,7 @@ func build(c config.Config, p platform.Platform, configPath string) (plan.Plan, 
 	addTLS(&result, c, p)
 	addBackups(&result, c, p)
 	if configPath != "" {
-		services := managed.DesiredServices(c, configPath)
+		services := desiredManagedServices(c, p, configPath)
 		content, err := json.Marshal(services)
 		if err != nil {
 			return plan.Plan{}, fmt.Errorf("encode managed service inventory: %w", err)
@@ -68,6 +73,59 @@ func build(c config.Config, p platform.Platform, configPath string) (plan.Plan, 
 		result.Add(plan.ManagedState("Record poorman-managed services", managed.StatePath, configPath, string(content)))
 	}
 	return result, nil
+}
+
+func addManagedMOTD(pn *plan.Plan, p platform.Platform) {
+	switch p.Family {
+	case "debian":
+		pn.Add(plan.Dir("Create dynamic MOTD directory", "/etc/update-motd.d", "root", 0o755))
+		content := "#!/bin/sh\nprintf '%s\\n' '" + managedServerMessage + "'\n"
+		pn.Add(plan.ManagedFile("Install poorman managed-server MOTD", "/etc/update-motd.d/99-poorman", content, "root", 0o755))
+	case "rhel":
+		pn.Add(plan.Dir("Create MOTD fragment directory", "/etc/motd.d", "root", 0o755))
+		pn.Add(plan.ManagedFile("Install poorman managed-server MOTD", "/etc/motd.d/99-poorman", managedServerMessage+"\n", "root", 0o644))
+	default:
+		pn.Add(plan.ManagedFile("Install poorman managed-server MOTD", "/etc/motd", managedServerMessage+"\n", "root", 0o644))
+	}
+}
+
+func desiredManagedServices(c config.Config, p platform.Platform, configPath string) []managed.Service {
+	services := managed.DesiredServices(c, configPath)
+	for i := range services {
+		if services[i].Kind == "web" {
+			services[i].Name = webServiceName(c.WebServer.Provider, p)
+			services[i].Files = managedWebConfigFiles(c, p)
+			break
+		}
+	}
+	return services
+}
+
+func webServiceName(web string, p platform.Platform) string {
+	switch web {
+	case "apache":
+		if p.Family == "debian" {
+			return "apache2"
+		}
+		return "httpd"
+	case "openlitespeed":
+		return "lsws"
+	default:
+		return "nginx"
+	}
+}
+
+func managedWebConfigFiles(c config.Config, p platform.Platform) []string {
+	files := make([]string, 0, len(c.Sites)+1)
+	if c.WebServer.Provider == "openlitespeed" {
+		files = append(files, "/usr/local/lsws/conf/poorman.conf")
+	}
+	for _, site := range c.Sites {
+		path, _ := siteConfig(c.WebServer.Provider, site, p)
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // WebServer remains as a compatibility entry point for early callers.
@@ -236,6 +294,16 @@ func packageSet(c config.Config, p platform.Platform) []string {
 	}
 	if c.Backups.Enabled {
 		set["rsync"] = true
+		if c.Backups.Offsite != nil && c.Backups.Offsite.Provider == "s3" {
+			switch p.Family {
+			case "alpine":
+				set["aws-cli"] = true
+			case "rhel":
+				set["awscli2"] = true
+			default:
+				set["awscli"] = true
+			}
+		}
 	}
 	writableWordPress := anyWordPress(c) && wordpressInitializationAllowed(c)
 	if writableWordPress {
@@ -741,7 +809,7 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		step.UnlessCommand, step.UnlessArgs = "test", []string{"-e", filepath.Join(dataDir, "PG_VERSION")}
 		pn.Add(step)
 		if d.Port > 0 {
-			pn.Add(plan.EnsureLine("Set PostgreSQL replica port", filepath.Join(dataDir, "postgresql.conf"), fmt.Sprintf("port = %d", d.Port)))
+			pn.Add(plan.EnsureLineOwnedBy("Set PostgreSQL replica port", filepath.Join(dataDir, "postgresql.conf"), fmt.Sprintf("port = %d", d.Port), "postgres", "postgres", 0o600))
 		}
 		pn.Warn("PostgreSQL replica bootstrap requires an empty data directory and a maintenance window; take a verified backup first")
 	}
@@ -873,17 +941,7 @@ func mariaDBReplicationConfigPath(p platform.Platform) string {
 }
 
 func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
-	service := c.WebServer.Provider
-	if service == "apache" {
-		if p.Family == "debian" {
-			service = "apache2"
-		} else {
-			service = "httpd"
-		}
-	}
-	if service == "openlitespeed" {
-		service = "lsws"
-	}
+	service := webServiceName(c.WebServer.Provider, p)
 	writableWordPress := anyWordPress(c) && wordpressInitializationAllowed(c)
 	if writableWordPress {
 		download := plan.Cmd("Download wp-cli", "curl", true, "-fsSL", "-o", "/tmp/poorman-wp-cli.phar", "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar")
@@ -901,14 +959,12 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 		pn.Add(plan.ManagedFile("Configure Alpine PHP-FPM pool", "/etc/php84/php-fpm.d/zz-poorman.conf", pool, "root", 0o644))
 	}
 	for _, s := range c.Sites {
+		_, runtimeGroup := webRuntimeIdentity(c.WebServer.Provider, p)
 		owner := s.Owner
 		if owner == "" {
-			owner = "www-data"
-			if p.Family != "debian" {
-				owner = "apache"
-			}
+			owner, _ = webRuntimeIdentity(c.WebServer.Provider, p)
 		}
-		pn.Add(plan.Dir("Create document root for "+s.Domain, s.Root, owner, 0o750))
+		pn.Add(plan.DirOwnedBy("Create document root for "+s.Domain, s.Root, owner, runtimeGroup, 0o750))
 		path, content := siteConfig(c.WebServer.Provider, s, p)
 		pn.Add(plan.ManagedFile("Configure virtual host "+s.Domain, path, content, "root", 0o644))
 		if s.WordPress != nil && writableWordPress {
@@ -932,17 +988,11 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if anyWordPress(c) && !writableWordPress {
 		pn.Warn("Skipped WordPress initialization because this database is a replica or promoted independent instance")
 	}
-	validation := plan.Cmd("Validate "+c.WebServer.Provider+" configuration", validationCommand(c.WebServer.Provider), true, validationArgs(c.WebServer.Provider)...)
 	if c.WebServer.Provider == "openlitespeed" {
-		// A fresh OpenLiteSpeed package ships an active Example vhost whose
-		// document-root ownership makes `openlitespeed -t` exit 1 even though it
-		// reports only these two warnings. Keep all other validator output fatal.
-		validation.AllowedFailureLines = []string{
-			"[config:server:vhosts:vhost:Example] Uid of /usr/local/lsws/Example/html/",
-			"[config:server:vhosts:vhost:Example] Gid of /usr/local/lsws/Example/html/",
-		}
+		exampleUser, exampleGroup := openLiteSpeedRuntimeIdentity(p)
+		pn.Add(plan.DirOwnedBy("Restore OpenLiteSpeed example root ownership", "/usr/local/lsws/Example/html", exampleUser, exampleGroup, 0o755))
 	}
-	pn.Add(validation)
+	pn.Add(plan.Cmd("Validate "+c.WebServer.Provider+" configuration", validationCommand(c.WebServer.Provider), true, validationArgs(c.WebServer.Provider)...))
 	pn.Add(restartService(p, service))
 	if c.WebServer.Provider == "openlitespeed" {
 		pn.Warn("OpenLiteSpeed include-managed configuration is edited as files and will not appear as editable state in WebAdmin")
@@ -957,6 +1007,30 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 			}
 			pn.Add(enableService(p, phpService))
 		}
+	}
+}
+
+func openLiteSpeedRuntimeIdentity(p platform.Platform) (string, string) {
+	if p.Family == "debian" {
+		return "nobody", "nogroup"
+	}
+	return "nobody", "nobody"
+}
+
+func webRuntimeIdentity(web string, p platform.Platform) (string, string) {
+	switch web {
+	case "openlitespeed":
+		return openLiteSpeedRuntimeIdentity(p)
+	case "apache":
+		if p.Family == "debian" {
+			return "www-data", "www-data"
+		}
+		return "apache", "apache"
+	default:
+		if p.Family == "debian" {
+			return "www-data", "www-data"
+		}
+		return "nginx", "nginx"
 	}
 }
 
@@ -977,24 +1051,29 @@ func siteConfig(web string, s config.Site, p platform.Platform) (string, string)
 			}
 			php = fmt.Sprintf("\n    index index.php index.html;\n    location / { try_files $uri $uri/ /index.php?$args; }\n    location ~ \\.php$ { include fastcgi_params; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; fastcgi_pass %s; }", upstream)
 		}
-		content := fmt.Sprintf("# Managed by poorman\nserver {\n    listen 80;\n    server_name %s %s;\n    root %s;%s\n}\n", s.Domain, aliases, s.Root, php)
+		content := fmt.Sprintf("%sserver {\n    listen 80;\n    server_name %s %s;\n    root %s;%s\n}\n", managedConfigHeader, s.Domain, aliases, s.Root, php)
 		return "/etc/nginx/conf.d/poorman-" + s.Domain + ".conf", content
 	}
 	if web == "apache" {
-		content := fmt.Sprintf("# Managed by poorman\n<VirtualHost *:80>\n  ServerName %s\n  ServerAlias %s\n  DocumentRoot %s\n  <Directory %s>\n    AllowOverride All\n    Require all granted\n  </Directory>\n</VirtualHost>\n", s.Domain, aliases, s.Root, s.Root)
+		content := fmt.Sprintf("%s<VirtualHost *:80>\n  ServerName %s\n  ServerAlias %s\n  DocumentRoot %s\n  <Directory %s>\n    AllowOverride All\n    Require all granted\n  </Directory>\n</VirtualHost>\n", managedConfigHeader, s.Domain, aliases, s.Root, s.Root)
 		base := "/etc/httpd/conf.d"
 		if p.Family == "debian" {
 			base = "/etc/apache2/sites-enabled"
 		}
 		return filepath.Join(base, "poorman-"+s.Domain+".conf"), content
 	}
-	content := fmt.Sprintf("docRoot                   %s\nvhDomain                  %s\nvhAliases                 %s\nenableGzip                1\nindex  {\n  useServer               0\n  indexFiles              index.php,index.html\n}\nrewrite  {\n  enable                  1\n  autoLoadHtaccess        1\n}\nextprocessor lsphp {\n  type                    lsapi\n  address                 uds://tmp/lshttpd/%s.sock\n  maxConns                10\n  env                     LSAPI_CHILDREN=10\n  initTimeout             60\n  retryTimeout            0\n  persistConn             1\n  respBuffer              0\n  autoStart               1\n  path                    /usr/local/lsws/lsphp84/bin/lsphp\n  backlog                 100\n  instances               1\n}\nscriptHandler  {\n  add                     lsapi:lsphp php\n}\n", s.Root, s.Domain, strings.Join(s.Aliases, ","), s.Domain)
+	owner := s.Owner
+	if owner == "" {
+		owner, _ = openLiteSpeedRuntimeIdentity(p)
+	}
+	content := fmt.Sprintf("%sdocRoot                   %s\nvhDomain                  %s\nvhAliases                 %s\nenableGzip                1\nindex  {\n  useServer               0\n  indexFiles              index.php,index.html\n}\nrewrite  {\n  enable                  1\n  autoLoadHtaccess        1\n}\nextprocessor lsphp {\n  type                    lsapi\n  address                 uds://tmp/lshttpd/%s.sock\n  maxConns                10\n  env                     LSAPI_CHILDREN=10\n  initTimeout             60\n  retryTimeout            0\n  persistConn             1\n  respBuffer              0\n  autoStart               1\n  path                    /usr/local/lsws/lsphp84/bin/lsphp\n  backlog                 100\n  instances               1\n  extUser                 %s\n  extGroup                %s\n}\nscriptHandler  {\n  add                     lsapi:lsphp php\n}\n", managedConfigHeader, s.Root, s.Domain, strings.Join(s.Aliases, ","), s.Domain, owner, owner)
 	return "/usr/local/lsws/conf/vhosts/" + s.Domain + "/vhconf.conf", content
 }
 
 func openLiteSpeedServerConfig(c config.Config) string {
 	var b strings.Builder
-	b.WriteString("# Managed by poorman\nlistener poormanHTTP {\n  address                 *:80\n  secure                  0\n")
+	b.WriteString(managedConfigHeader)
+	b.WriteString("listener poormanHTTP {\n  address                 *:80\n  secure                  0\n")
 	for _, s := range c.Sites {
 		domains := append([]string{s.Domain}, s.Aliases...)
 		fmt.Fprintf(&b, "  map                     %s %s\n", s.Domain, strings.Join(domains, ","))
@@ -1086,6 +1165,10 @@ func addBackups(pn *plan.Plan, c config.Config, p platform.Platform) {
 	scriptPath := "/usr/local/sbin/poorman-backup"
 	cronPath := "/etc/cron.d/poorman-backup"
 	sites := c.Sites
+	offsitePrefix := ""
+	if c.Backups.Offsite != nil {
+		offsitePrefix = strings.Trim(c.Backups.Offsite.Prefix, "/")
+	}
 	managedMariaDBInstance := c.Database != nil && isManagedMariaDBInstance(*c.Database)
 	if managedMariaDBInstance {
 		layout := mariaDBReplicaLayout(*c.Database)
@@ -1095,6 +1178,7 @@ func addBackups(pn *plan.Plan, c config.Config, p platform.Platform) {
 		// The primary configuration owns same-host website backups. This
 		// instance-specific job protects only the independent replica data.
 		sites = nil
+		offsitePrefix = strings.Trim(strings.Join([]string{offsitePrefix, layout.Service}, "/"), "/")
 	}
 	pn.Add(plan.Dir("Create backup destination", destination, "root", 0o700))
 	var database string
@@ -1108,14 +1192,44 @@ func addBackups(pn *plan.Plan, c config.Config, p platform.Platform) {
 			database = "mariadb-dump --all-databases --single-transaction | gzip > \"$DEST/database.sql.gz\""
 		}
 	}
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\nDEST=%q/$(date +%%F-%%H%%M%%S)\ninstall -d -m 700 \"$DEST\"\n%s\n", destination, database)
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\nBASE=%q\nRUN=$(date -u +%%F-%%H%%M%%S)\nDEST=\"$BASE/$RUN\"\ninstall -d -m 700 \"$DEST\"\n%s\n", destination, database)
 	for _, s := range sites {
 		script += fmt.Sprintf("tar -C %q -czf \"$DEST/%s-files.tar.gz\" .\n", s.Root, s.Domain)
 	}
-	script += "find " + shellQuote(destination) + " -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf -- {} +\n"
+	if offsite := c.Backups.Offsite; offsite != nil && offsite.Provider == "s3" {
+		prefix := offsitePrefix
+		if prefix != "" {
+			prefix += "/"
+		}
+		aws := awsCLICommand(*offsite)
+		remoteDays := offsite.EffectiveRetentionDays(c.Backups.EffectiveRetentionDays())
+		script += fmt.Sprintf("S3_ROOT=%s\nS3_PREFIX=%s\n%s s3 cp \"$DEST\" \"${S3_ROOT}${S3_PREFIX}${RUN}/\" --recursive --only-show-errors\n", shellQuote("s3://"+offsite.Bucket+"/"), shellQuote(prefix), aws)
+		script += fmt.Sprintf("CUTOFF=$(date -u -d '-%d days' +%%F-%%H%%M%%S)\n", remoteDays)
+		script += fmt.Sprintf("for REMOTE_RUN in $(%s s3api list-objects-v2 --bucket %s --prefix \"$S3_PREFIX\" --delimiter / --query 'CommonPrefixes[].Prefix' --output text); do\n", aws, shellQuote(offsite.Bucket))
+		script += "  RUN_NAME=${REMOTE_RUN#\"$S3_PREFIX\"}\n  RUN_NAME=${RUN_NAME%/}\n  case \"$RUN_NAME\" in\n    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9])\n      if [ \"$RUN_NAME\" \\< \"$CUTOFF\" ]; then\n"
+		script += fmt.Sprintf("        %s s3 rm \"${S3_ROOT}${REMOTE_RUN}\" --recursive --only-show-errors\n", aws)
+		script += "      fi\n      ;;\n  esac\ndone\n"
+		pn.Warn("S3 backup access must allow PutObject, ListBucket, and DeleteObject; credentials are read from the AWS CLI credential chain")
+	}
+	localMinutes := c.Backups.EffectiveRetentionDays() * 24 * 60
+	script += fmt.Sprintf("find %s -mindepth 1 -maxdepth 1 -type d -mmin +%d -exec rm -rf -- {} +\n", shellQuote(destination), localMinutes)
 	pn.Add(plan.ManagedFile("Install backup script", scriptPath, script, "root", 0o700))
 	cron := c.Backups.Schedule + " root " + scriptPath + "\n"
 	pn.Add(plan.ManagedFile("Schedule backups", cronPath, cron, "root", 0o600))
+}
+
+func awsCLICommand(offsite config.OffsiteBackup) string {
+	command := "aws"
+	if offsite.Profile != "" {
+		command += " --profile " + shellQuote(offsite.Profile)
+	}
+	if offsite.Region != "" {
+		command += " --region " + shellQuote(offsite.Region)
+	}
+	if offsite.Endpoint != "" {
+		command += " --endpoint-url " + shellQuote(offsite.Endpoint)
+	}
+	return command
 }
 
 func enableService(p platform.Platform, service string) plan.Step {

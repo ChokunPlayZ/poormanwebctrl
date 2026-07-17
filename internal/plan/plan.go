@@ -28,6 +28,7 @@ type Step struct {
 	Content        string
 	Mode           uint32
 	Owner          string
+	Group          string
 	RunAs          string
 	NeedsRoot      bool
 	Sensitive      bool
@@ -35,14 +36,10 @@ type Step struct {
 	TimeoutSeconds int
 	UnlessCommand  string
 	UnlessArgs     []string
-	// AllowedFailureLines permits a failed command only when every non-empty
-	// output line contains one of these substrings. It is intentionally strict
-	// so a known warning cannot mask an unrelated error from the same command.
-	AllowedFailureLines []string
-	StatePath           string
-	StateKey            string
-	StateContent        string
-	ServiceManager      string
+	StatePath      string
+	StateKey       string
+	StateContent   string
+	ServiceManager string
 }
 
 type Plan struct {
@@ -74,11 +71,11 @@ func (p Plan) Print(w io.Writer) {
 		var detail string
 		switch step.Kind {
 		case Directory:
-			detail = fmt.Sprintf("%sinstall -d -m %04o %s", prefix, mode(step.Mode, 0o755), step.Path)
+			detail = fmt.Sprintf("%sinstall -d -m %04o%s %s", prefix, mode(step.Mode, 0o755), ownershipDetail(step), step.Path)
 		case File:
-			detail = fmt.Sprintf("%smanage-file -m %04o %s", prefix, mode(step.Mode, 0o644), step.Path)
+			detail = fmt.Sprintf("%smanage-file -m %04o%s %s", prefix, mode(step.Mode, 0o644), ownershipDetail(step), step.Path)
 		case Line:
-			detail = fmt.Sprintf("%sensure-line %s", prefix, step.Path)
+			detail = fmt.Sprintf("%sensure-line%s %s", prefix, ownershipDetail(step), step.Path)
 		case State:
 			detail = fmt.Sprintf("%supdate managed service inventory %s", prefix, step.StatePath)
 		case Reconcile:
@@ -99,6 +96,17 @@ func (p Plan) Print(w io.Writer) {
 			fmt.Fprintln(w, "  -", warning)
 		}
 	}
+}
+
+func ownershipDetail(step Step) string {
+	detail := ""
+	if step.Owner != "" {
+		detail += " -o " + step.Owner
+	}
+	if step.Group != "" {
+		detail += " -g " + step.Group
+	}
+	return detail
 }
 
 func mode(value, fallback uint32) uint32 {
@@ -127,15 +135,27 @@ func AsUser(description, user, command string, args ...string) Step {
 }
 
 func Dir(description, path, owner string, mode uint32) Step {
-	return Step{Description: description, Kind: Directory, Path: path, Owner: owner, Mode: mode, NeedsRoot: true}
+	return DirOwnedBy(description, path, owner, owner, mode)
+}
+
+func DirOwnedBy(description, path, owner, group string, mode uint32) Step {
+	return Step{Description: description, Kind: Directory, Path: path, Owner: owner, Group: group, Mode: mode, NeedsRoot: true}
 }
 
 func ManagedFile(description, path, content, owner string, mode uint32) Step {
-	return Step{Description: description, Kind: File, Path: path, Content: content, Owner: owner, Mode: mode, NeedsRoot: true}
+	return ManagedFileOwnedBy(description, path, content, owner, owner, mode)
+}
+
+func ManagedFileOwnedBy(description, path, content, owner, group string, mode uint32) Step {
+	return Step{Description: description, Kind: File, Path: path, Content: content, Owner: owner, Group: group, Mode: mode, NeedsRoot: true}
 }
 
 func EnsureLine(description, path, line string) Step {
-	return Step{Description: description, Kind: Line, Path: path, Content: line, NeedsRoot: true}
+	return EnsureLineOwnedBy(description, path, line, "root", "root", 0o600)
+}
+
+func EnsureLineOwnedBy(description, path, line, owner, group string, mode uint32) Step {
+	return Step{Description: description, Kind: Line, Path: path, Content: line, Owner: owner, Group: group, Mode: mode, NeedsRoot: true}
 }
 
 // ManagedState records the desired services for one configuration after the

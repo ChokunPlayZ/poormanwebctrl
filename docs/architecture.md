@@ -27,7 +27,7 @@ Plans follow dependency order:
 5. Install WordPress when selected.
 6. Validate and restart services.
 7. Apply firewalls and certificates.
-8. Install backup jobs.
+8. Install backup jobs, enforce local retention, and optionally copy/prune timestamped runs in S3.
 
 Database management is a declarative subgraph inside step 3. A database
 instance can contain multiple logical databases, users, tables/columns, and
@@ -36,7 +36,7 @@ provider-specific SQL. On a physical replica, this subgraph is deliberately
 not emitted: the primary owns schema and ACL changes, while replication carries
 them to the read-only instance.
 
-Managed files are intentionally owned by poorman and replaced on apply. Unrelated system configuration is left alone.
+Managed files are intentionally owned by poorman and replaced on apply. Every managed file and directory declares an explicit owner and group; web roots use the configured deployment owner with the active web server's runtime group. The managed inventory records vhost configuration paths so removed sites and provider switches delete obsolete poorman-owned files before the desired files are regenerated. Unrelated system configuration is left alone.
 
 Each apply also maintains `/var/lib/poorman/managed.json`. It records the
 configuration file and system service identity for every poorman-managed

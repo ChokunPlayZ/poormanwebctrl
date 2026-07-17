@@ -25,5 +25,17 @@
   }],
   "tls": { "enabled": true, "email": "admin@example.com" },
   "firewall": { "enabled": true },
-  "backups": { "enabled": true, "destination": "/var/backups/poorman", "schedule": "0 3 * * *" }
+  "backups": {
+    "enabled": true,
+    "destination": "/var/backups/poorman",
+    "schedule": "0 3 * * *",
+    "retention_days": 14,
+    "offsite": {
+      "provider": "s3",
+      "bucket": "company-server-backups",
+      "prefix": "production/wordpress",
+      "region": "ap-southeast-1",
+      "retention_days": 90
+    }
+  }
 }

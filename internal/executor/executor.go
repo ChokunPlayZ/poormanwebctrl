@@ -76,11 +76,23 @@ func reconcileManagedState(ctx context.Context, s plan.Step, out, errOut io.Writ
 	for _, service := range desired {
 		wanted[service.Key] = service
 	}
+	protectedFiles := map[string]bool{}
+	for _, service := range inventory.Services {
+		if service.ConfigPath == managed.ConfigKey(s.StateKey) {
+			continue
+		}
+		for _, path := range service.Files {
+			protectedFiles[filepath.Clean(path)] = true
+		}
+	}
 	for _, previous := range inventory.Services {
 		if previous.ConfigPath != managed.ConfigKey(s.StateKey) {
 			continue
 		}
 		current, ok := wanted[previous.Key]
+		if err := removeObsoleteManagedFiles(ctx, previous, current, ok, protectedFiles, out, errOut); err != nil {
+			return err
+		}
 		if ok && !managedServiceChanged(previous, current) {
 			continue
 		}
@@ -91,6 +103,66 @@ func reconcileManagedState(ctx context.Context, s plan.Step, out, errOut io.Writ
 			return err
 		}
 	}
+	return nil
+}
+
+func removeObsoleteManagedFiles(ctx context.Context, previous, current managed.Service, hasCurrent bool, protected map[string]bool, out, errOut io.Writer) error {
+	wanted := map[string]bool{}
+	if hasCurrent {
+		for _, path := range current.Files {
+			wanted[filepath.Clean(path)] = true
+		}
+	}
+	for _, path := range previous.Files {
+		path = filepath.Clean(path)
+		if wanted[path] || protected[path] {
+			continue
+		}
+		if !safeManagedConfigPath(path) {
+			return fmt.Errorf("refuse unsafe managed file path %q", path)
+		}
+		if err := removeManagedFile(ctx, path, out, errOut); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func safeManagedConfigPath(path string) bool {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) || path == string(filepath.Separator) {
+		return false
+	}
+	base := filepath.Base(path)
+	if strings.HasPrefix(path, "/etc/nginx/conf.d/") || strings.HasPrefix(path, "/etc/apache2/sites-enabled/") || strings.HasPrefix(path, "/etc/httpd/conf.d/") {
+		return strings.HasPrefix(base, "poorman-") && strings.HasSuffix(base, ".conf")
+	}
+	if path == "/usr/local/lsws/conf/poorman.conf" {
+		return true
+	}
+	if strings.HasPrefix(path, "/usr/local/lsws/conf/vhosts/") {
+		rel, err := filepath.Rel("/usr/local/lsws/conf/vhosts", path)
+		return err == nil && len(strings.Split(rel, string(filepath.Separator))) == 2 && base == "vhconf.conf"
+	}
+	// Unit tests exercise the same deletion path without touching host config.
+	return strings.HasPrefix(path, filepath.Clean(os.TempDir())+string(filepath.Separator)) && strings.HasPrefix(base, "poorman-")
+}
+
+func removeManagedFile(ctx context.Context, path string, out, errOut io.Writer) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil && os.Geteuid() != 0 {
+		cmd := exec.CommandContext(ctx, "sudo", "-n", "rm", "-f", "--", path)
+		cmd.Stdout, cmd.Stderr = out, errOut
+		if sudoErr := cmd.Run(); sudoErr != nil {
+			return fmt.Errorf("remove obsolete managed file %s: %w", path, sudoErr)
+		}
+	} else if err != nil {
+		return fmt.Errorf("remove obsolete managed file %s: %w", path, err)
+	}
+	fmt.Fprintf(out, "  removed obsolete managed file %s\n", path)
 	return nil
 }
 
@@ -165,18 +237,35 @@ func applyLine(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Wr
 		}
 	}
 	updated := strings.TrimRight(string(content), "\n") + "\n" + line + "\n"
-	s.Kind, s.Content, s.Mode, s.Owner = plan.File, updated, 0o600, "root"
+	s.Kind, s.Content = plan.File, updated
+	if s.Mode == 0 {
+		s.Mode = 0o600
+	}
+	if s.Owner == "" {
+		s.Owner = "root"
+	}
+	if s.Group == "" {
+		s.Group = s.Owner
+	}
 	return applyFile(ctx, s, in, out, errOut)
 }
 
 func applyDirectory(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) error {
 	args := []string{"-d", "-m", fmt.Sprintf("%04o", fallbackMode(s.Mode, 0o755))}
-	if s.Owner != "" {
-		args = append(args, "-o", s.Owner, "-g", s.Owner)
-	}
+	args = appendOwnershipArgs(args, s)
 	args = append(args, s.Path)
 	s.Command, s.Args = "install", args
 	return run(ctx, s, in, out, errOut)
+}
+
+func appendOwnershipArgs(args []string, s plan.Step) []string {
+	if s.Owner != "" {
+		args = append(args, "-o", s.Owner)
+	}
+	if s.Group != "" {
+		args = append(args, "-g", s.Group)
+	}
+	return args
 }
 
 func applyFile(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) error {
@@ -194,9 +283,7 @@ func applyFile(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Wr
 		return err
 	}
 	args := []string{"-D", "-m", fmt.Sprintf("%04o", fallbackMode(s.Mode, 0o644))}
-	if s.Owner != "" {
-		args = append(args, "-o", s.Owner, "-g", s.Owner)
-	}
+	args = appendOwnershipArgs(args, s)
 	args = append(args, name, filepath.Clean(s.Path))
 	s.Command, s.Args = "install", args
 	return run(ctx, s, in, out, errOut)
@@ -252,12 +339,7 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 		defer cancel()
 	}
 	cmd := exec.CommandContext(commandContext, command, args...)
-	var captured bytes.Buffer
-	if len(s.AllowedFailureLines) > 0 {
-		cmd.Stdout, cmd.Stderr = &captured, &captured
-	} else {
-		cmd.Stdout, cmd.Stderr = out, errOut
-	}
+	cmd.Stdout, cmd.Stderr = out, errOut
 	if s.Input != "" {
 		resolved, err := resolveEnv(s.Input, s.SQLSecrets)
 		if err != nil {
@@ -271,40 +353,7 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 		// Steps that need input declare it explicitly through Input.
 		cmd.Stdin = nil
 	}
-	err := cmd.Run()
-	if len(s.AllowedFailureLines) == 0 {
-		return err
-	}
-	if captured.Len() > 0 {
-		_, _ = out.Write(captured.Bytes())
-	}
-	if err != nil && failureContainsOnlyAllowedLines(captured.String(), s.AllowedFailureLines) {
-		fmt.Fprintln(out, "  only known non-fatal warnings were reported; continuing")
-		return nil
-	}
-	return err
-}
-
-func failureContainsOnlyAllowedLines(output string, allowed []string) bool {
-	found := false
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		matched := false
-		for _, pattern := range allowed {
-			if pattern != "" && strings.Contains(line, pattern) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
-		found = true
-	}
-	return found
+	return cmd.Run()
 }
 
 func resolveEnv(input string, sqlEscape bool) (string, error) {

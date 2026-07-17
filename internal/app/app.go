@@ -293,7 +293,7 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 		Sites:     []config.Site{{Domain: domain, Root: root, Owner: owner, Runtime: runtimeName, WordPress: wordpress}},
 		TLS:       config.TLS{Enabled: tlsEnabled, Email: "admin@" + domain},
 		Firewall:  config.Firewall{Enabled: true},
-		Backups:   config.Backup{Enabled: backupEnabled, Destination: "/var/backups/poorman", Schedule: "0 3 * * *"},
+		Backups:   config.Backup{Enabled: backupEnabled, Destination: "/var/backups/poorman", Schedule: "0 3 * * *", RetentionDays: 14},
 	}
 	if err := config.Write(*path, c); err != nil {
 		return err
@@ -1475,14 +1475,19 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 		}
 		ui.clear()
 		ui.brand("Guardrails & backups", "Turn on the protections that keep a live server recoverable")
-		ui.panel("CURRENT", fmt.Sprintf("https       %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s", enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured")))
-		ui.panel("ACTIONS", "1  HTTPS and certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n0  back")
+		offsite := "disabled"
+		if c.Backups.Offsite != nil {
+			offsite = c.Backups.Offsite.Provider + "://" + c.Backups.Offsite.Bucket
+		}
+		ui.panel("CURRENT", fmt.Sprintf("https       %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s\nkeep local  %d days\noffsite     %s", enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured"), c.Backups.EffectiveRetentionDays(), offsite))
+		ui.panel("ACTIONS", "1  HTTPS and certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n6  retention and offsite storage\n0  back")
 		switch selectMenu(reader, ui, "Guardrails & backups", "1",
 			selectorChoice{Value: "1", Label: "HTTPS and certificate email"},
 			selectorChoice{Value: "2", Label: "firewall"},
 			selectorChoice{Value: "3", Label: "backups and schedule"},
 			selectorChoice{Value: "4", Label: "run backup now"},
 			selectorChoice{Value: "5", Label: "backup inventory"},
+			selectorChoice{Value: "6", Label: "retention and offsite storage"},
 			selectorChoice{Value: "0", Label: "back"},
 		) {
 		case "1":
@@ -1539,12 +1544,55 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 				ui.warn(err.Error())
 			}
 			pause(reader, ui)
+		case "6":
+			if !c.Backups.Enabled {
+				ui.warn("Backups are disabled. Enable them in this menu first.")
+				pause(reader, ui)
+				continue
+			}
+			configureBackupRetention(&c, reader, ui)
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Backup retention and offsite settings updated")
 		case "0", "q", "Q":
 			return nil
 		default:
 			ui.warn("Unknown selection.")
 		}
 	}
+}
+
+func configureBackupRetention(c *config.Config, reader *bufio.Reader, ui *terminalUI) {
+	c.Backups.RetentionDays = promptRetentionDays(reader, ui, "Keep local backups for days", c.Backups.EffectiveRetentionDays())
+	enabled := c.Backups.Offsite != nil
+	if !yesNo(selectOption(reader, ui, "Copy backups to S3?", enabledDefault(enabled), "y", "n")) {
+		c.Backups.Offsite = nil
+		return
+	}
+	offsite := config.OffsiteBackup{Provider: "s3"}
+	if c.Backups.Offsite != nil {
+		offsite = *c.Backups.Offsite
+		offsite.Provider = "s3"
+	}
+	offsite.Bucket = prompt(reader, ui, "S3 bucket", offsite.Bucket)
+	offsite.Prefix = prompt(reader, ui, "S3 key prefix", defaultValue(offsite.Prefix, "poorman"))
+	offsite.Region = prompt(reader, ui, "AWS region (blank uses credential defaults)", offsite.Region)
+	offsite.Profile = prompt(reader, ui, "AWS profile (blank uses server role/environment)", offsite.Profile)
+	offsite.Endpoint = prompt(reader, ui, "S3 endpoint URL (blank uses AWS)", offsite.Endpoint)
+	offsite.RetentionDays = promptRetentionDays(reader, ui, "Keep offsite backups for days", offsite.EffectiveRetentionDays(c.Backups.RetentionDays))
+	c.Backups.Offsite = &offsite
+}
+
+func promptRetentionDays(reader *bufio.Reader, ui *terminalUI, label string, fallback int) int {
+	value, err := strconv.Atoi(prompt(reader, ui, label, strconv.Itoa(fallback)))
+	if err != nil || value < 1 || value > 36500 {
+		ui.warn("Retention must be between 1 and 36500 days; keeping the previous value.")
+		return fallback
+	}
+	return value
 }
 
 func defaultSiteEmail(c config.Config) string {

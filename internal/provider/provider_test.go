@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -167,6 +169,77 @@ func TestWordPressPlanHasCompleteWorkflow(t *testing.T) {
 	}
 }
 
+func TestS3BackupPlanUploadsAndPrunesIndependentCopies(t *testing.T) {
+	c := config.Default()
+	c.Backups.RetentionDays = 30
+	c.Backups.Offsite = &config.OffsiteBackup{
+		Provider:      "s3",
+		Bucket:        "company-server-backups",
+		Prefix:        "production/web-01",
+		Region:        "ap-southeast-1",
+		Profile:       "backup-writer",
+		RetentionDays: 90,
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packages, script string
+	for _, step := range p.Steps {
+		if step.Description == "Install required packages" {
+			packages = strings.Join(step.Args, " ")
+		}
+		if step.Description == "Install backup script" {
+			script = step.Content
+		}
+	}
+	for _, want := range []string{"awscli", "rsync"} {
+		if !strings.Contains(packages, want) {
+			t.Errorf("backup packages %q do not contain %q", packages, want)
+		}
+	}
+	for _, want := range []string{
+		"aws --profile 'backup-writer' --region 'ap-southeast-1' s3 cp",
+		"S3_ROOT='s3://company-server-backups/'",
+		"S3_PREFIX='production/web-01/'",
+		"list-objects-v2",
+		"s3 rm",
+		"date -u -d '-90 days'",
+		"-mmin +43200",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("backup script does not contain %q:\n%s", want, script)
+		}
+	}
+	if len(p.Warnings) == 0 || !strings.Contains(strings.Join(p.Warnings, " "), "PutObject") {
+		t.Fatalf("S3 permissions warning missing: %v", p.Warnings)
+	}
+	command := exec.Command("sh", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generated backup script is not valid shell: %v: %s\n%s", err, output, script)
+	}
+}
+
+func TestS3BackupUsesReplicaSpecificPrefix(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "mariadb", Role: "replica", Port: 3307, DataDir: "/var/lib/mysql/poorman-replica-3307",
+		Replication: config.Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2},
+	}
+	c.Backups.Offsite = &config.OffsiteBackup{Provider: "s3", Bucket: "company-server-backups", Prefix: "production"}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range p.Steps {
+		if step.Description == "Install backup script" && strings.Contains(step.Content, "S3_PREFIX='production/poorman-mariadb-replica-3307/'") {
+			return
+		}
+	}
+	t.Fatal("replica backup did not receive an isolated S3 prefix")
+}
+
 func TestReplicaPromotionIsGuardedByRole(t *testing.T) {
 	c := config.Default()
 	if _, err := PromoteReplica(c, platform.Platform{Family: "debian"}); err == nil {
@@ -190,16 +263,168 @@ func TestOpenLiteSpeedUsesOfficialRepositoryAndInclude(t *testing.T) {
 			t.Errorf("OpenLiteSpeed plan missing %q", want)
 		}
 	}
-	for _, step := range p.Steps {
-		if step.Description != "Validate openlitespeed configuration" {
-			continue
-		}
-		if len(step.AllowedFailureLines) != 2 {
-			t.Fatalf("OpenLiteSpeed validation allowed warnings = %#v, want exact stock Example UID/GID warnings", step.AllowedFailureLines)
-		}
-		return
+}
+
+func TestOpenLiteSpeedFixesExampleOwnershipBeforeValidation(t *testing.T) {
+	c := config.Default()
+	c.WebServer.Provider = "openlitespeed"
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("OpenLiteSpeed validation step not found")
+	ownershipIndex, validationIndex := -1, -1
+	for i, step := range p.Steps {
+		switch step.Description {
+		case "Restore OpenLiteSpeed example root ownership":
+			ownershipIndex = i
+			if step.Kind != plan.Directory || step.Path != "/usr/local/lsws/Example/html" || step.Owner != "nobody" || step.Group != "nogroup" || step.Mode != 0o755 {
+				t.Fatalf("example ownership step = %#v", step)
+			}
+		case "Validate openlitespeed configuration":
+			validationIndex = i
+		}
+	}
+	if ownershipIndex < 0 || validationIndex < 0 || ownershipIndex >= validationIndex {
+		t.Fatalf("ownership step index %d, validation step index %d; ownership must run first", ownershipIndex, validationIndex)
+	}
+}
+
+func TestManagedServerMOTDIsInstalledWithPlatformOwnership(t *testing.T) {
+	for _, tt := range []struct {
+		family string
+		path   string
+		mode   uint32
+	}{
+		{family: "debian", path: "/etc/update-motd.d/99-poorman", mode: 0o755},
+		{family: "rhel", path: "/etc/motd.d/99-poorman", mode: 0o644},
+		{family: "alpine", path: "/etc/motd", mode: 0o644},
+	} {
+		c := config.Default()
+		p, err := Build(c, platform.Platform{Distro: tt.family, Family: tt.family})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, step := range p.Steps {
+			if step.Description != "Install poorman managed-server MOTD" {
+				continue
+			}
+			found = true
+			if step.Path != tt.path || step.Mode != tt.mode || step.Owner != "root" || step.Group != "root" || !strings.Contains(step.Content, managedServerMessage) {
+				t.Errorf("%s MOTD step = %#v", tt.family, step)
+			}
+		}
+		if !found {
+			t.Errorf("%s plan has no managed-server MOTD", tt.family)
+		}
+	}
+}
+
+func TestEveryManagedFileAndDirectoryDeclaresOwnership(t *testing.T) {
+	for _, tt := range []struct{ web, family string }{
+		{web: "nginx", family: "debian"},
+		{web: "apache", family: "rhel"},
+		{web: "openlitespeed", family: "debian"},
+	} {
+		c := config.Default()
+		c.WebServer.Provider = tt.web
+		p, err := Build(c, platform.Platform{Distro: tt.family, Family: tt.family})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, step := range p.Steps {
+			if step.Kind != plan.Directory && step.Kind != plan.File && step.Kind != plan.Line {
+				continue
+			}
+			if step.Owner == "" || step.Group == "" {
+				t.Errorf("%s/%s step lacks explicit ownership: %#v", tt.family, tt.web, step)
+			}
+		}
+	}
+}
+
+func TestWebRootOwnershipUsesDeploymentOwnerAndRuntimeGroup(t *testing.T) {
+	for _, tt := range []struct{ web, family, group string }{
+		{web: "nginx", family: "debian", group: "www-data"},
+		{web: "nginx", family: "rhel", group: "nginx"},
+		{web: "apache", family: "debian", group: "www-data"},
+		{web: "apache", family: "rhel", group: "apache"},
+		{web: "openlitespeed", family: "debian", group: "nogroup"},
+		{web: "openlitespeed", family: "rhel", group: "nobody"},
+	} {
+		c := config.Default()
+		c.WebServer.Provider = tt.web
+		p, err := Build(c, platform.Platform{Distro: tt.family, Family: tt.family})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, step := range p.Steps {
+			if step.Description != "Create document root for example.com" {
+				continue
+			}
+			found = true
+			if step.Owner != "webadmin" || step.Group != tt.group || step.Mode != 0o750 {
+				t.Errorf("%s/%s document root ownership = %s:%s mode %04o", tt.family, tt.web, step.Owner, step.Group, step.Mode)
+			}
+		}
+		if !found {
+			t.Errorf("%s/%s document root step missing", tt.family, tt.web)
+		}
+	}
+}
+
+func TestManagedWebFilesCoverEveryVhostAndProviderSwitch(t *testing.T) {
+	c := config.Default()
+	c.Sites = append(c.Sites, config.Site{Domain: "shop.example.com", Root: "/var/www/shop.example.com", Owner: "webadmin", Runtime: "php"})
+	for _, tt := range []struct {
+		web     string
+		family  string
+		service string
+		files   []string
+	}{
+		{web: "nginx", family: "debian", service: "nginx", files: []string{"/etc/nginx/conf.d/poorman-example.com.conf", "/etc/nginx/conf.d/poorman-shop.example.com.conf"}},
+		{web: "apache", family: "rhel", service: "httpd", files: []string{"/etc/httpd/conf.d/poorman-example.com.conf", "/etc/httpd/conf.d/poorman-shop.example.com.conf"}},
+		{web: "openlitespeed", family: "debian", service: "lsws", files: []string{"/usr/local/lsws/conf/poorman.conf", "/usr/local/lsws/conf/vhosts/example.com/vhconf.conf", "/usr/local/lsws/conf/vhosts/shop.example.com/vhconf.conf"}},
+	} {
+		c.WebServer.Provider = tt.web
+		services := desiredManagedServices(c, platform.Platform{Distro: tt.family, Family: tt.family}, "/etc/poorman.json")
+		if len(services) == 0 || services[0].Name != tt.service || !slices.Equal(services[0].Files, tt.files) {
+			t.Errorf("%s/%s managed web service = %#v, want service %s files %#v", tt.family, tt.web, services[0], tt.service, tt.files)
+		}
+	}
+}
+
+func TestOpenLiteSpeedVhostUsesSiteOwnerAndManagedHeader(t *testing.T) {
+	c := config.Default()
+	c.WebServer.Provider = "openlitespeed"
+	_, content := siteConfig("openlitespeed", c.Sites[0], platform.Platform{Distro: "ubuntu", Family: "debian"})
+	for _, want := range []string{managedConfigHeader, "extUser                 webadmin", "extGroup                webadmin"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("OpenLiteSpeed vhost config missing %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestPostgresReplicaLineEditPreservesDatabaseOwnership(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "postgresql", Role: "replica", Port: 5433, DataDir: "/var/lib/postgresql/poorman-replica",
+		Replication: config.Replication{PrimaryHost: "10.0.0.10", PrimaryPort: 5432, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", Slot: "poorman_replica_1"},
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range p.Steps {
+		if step.Description == "Set PostgreSQL replica port" {
+			if step.Kind != plan.Line || step.Owner != "postgres" || step.Group != "postgres" || step.Mode != 0o600 {
+				t.Fatalf("PostgreSQL line edit ownership = %#v", step)
+			}
+			return
+		}
+	}
+	t.Fatal("PostgreSQL replica port step not found")
 }
 
 func TestOpenLiteSpeedDebianUsesPublishedLSPHPPackages(t *testing.T) {

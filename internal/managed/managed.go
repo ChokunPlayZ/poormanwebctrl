@@ -18,15 +18,16 @@ const (
 )
 
 type Service struct {
-	Key        string `json:"key"`
-	ConfigPath string `json:"config_path"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-	Provider   string `json:"provider,omitempty"`
-	Role       string `json:"role,omitempty"`
-	Port       int    `json:"port,omitempty"`
-	DataDir    string `json:"data_dir,omitempty"`
-	Database   string `json:"database,omitempty"`
+	Key        string   `json:"key"`
+	ConfigPath string   `json:"config_path"`
+	Kind       string   `json:"kind"`
+	Name       string   `json:"name"`
+	Provider   string   `json:"provider,omitempty"`
+	Role       string   `json:"role,omitempty"`
+	Port       int      `json:"port,omitempty"`
+	DataDir    string   `json:"data_dir,omitempty"`
+	Database   string   `json:"database,omitempty"`
+	Files      []string `json:"files,omitempty"`
 }
 
 type Inventory struct {
@@ -69,6 +70,9 @@ func Load(path string) (Inventory, error) {
 
 func Marshal(inventory Inventory) ([]byte, error) {
 	inventory.Version = 1
+	for i := range inventory.Services {
+		sort.Strings(inventory.Services[i].Files)
+	}
 	sort.Slice(inventory.Services, func(i, j int) bool { return inventory.Services[i].Key < inventory.Services[j].Key })
 	b, err := json.MarshalIndent(inventory, "", "  ")
 	if err != nil {
@@ -93,7 +97,7 @@ func Apply(inventory Inventory, configPath string, services []Service) Inventory
 
 func DesiredServices(c config.Config, configPath string) []Service {
 	configPath = ConfigKey(configPath)
-	services := []Service{{Key: ServiceKey(configPath, "web"), ConfigPath: configPath, Kind: "web", Name: webService(c.WebServer.Provider)}}
+	services := []Service{{Key: ServiceKey(configPath, "web"), ConfigPath: configPath, Kind: "web", Name: webService(c.WebServer.Provider), Provider: c.WebServer.Provider}}
 	if c.Database != nil {
 		d := c.Database
 		name := d.Provider
