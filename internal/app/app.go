@@ -1016,16 +1016,17 @@ func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *te
 		}
 		database := &c.Database.Databases[index]
 		ui.clear()
-		ui.brand("Database / "+database.Name, "Manage tables and access control for the selected database")
+		ui.brand("Database / "+database.Name, "Manage this database, its tables, and access control")
 		ui.panel("DATABASE", fmt.Sprintf("provider  %s (%s)\nowner     %s\ntables    %d\nacl rules %d", c.Database.Provider, defaultValue(c.Database.Role, "standalone"), defaultValue(database.Owner, "none"), len(database.Tables), countDatabasePermissions(*c.Database, database.Name)))
 		if c.Database.Role == "replica" {
 			ui.panel("REPLICA", "This database is read-only. Manage tables and permissions on the primary.")
 		}
-		ui.panel("ACTIONS", "1  create table\n2  set user permissions\n3  view current ACLs\n0  back")
+		ui.panel("ACTIONS", "1  create table\n2  set user permissions\n3  view current ACLs\n4  delete database\n0  back")
 		choice := selectMenu(reader, ui, "Database / "+database.Name, "1",
 			selectorChoice{Value: "1", Label: "create table"},
 			selectorChoice{Value: "2", Label: "set user permissions"},
 			selectorChoice{Value: "3", Label: "view current ACLs"},
+			selectorChoice{Value: "4", Label: "delete database"},
 			selectorChoice{Value: "0", Label: "back"},
 		)
 		switch choice {
@@ -1052,10 +1053,62 @@ func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *te
 		case "3":
 			showDatabaseACL(ui, *c.Database, database.Name)
 			pause(reader, ui)
+		case "4":
+			if c.Database.Role == "replica" {
+				ui.warn("Replicas are read-only; delete the database on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			deleted, err := deleteDatabase(path, c, index, reader, ui)
+			if err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			if deleted {
+				return nil
+			}
 		case "0":
 			return nil
 		}
 	}
+}
+
+func deleteDatabase(path string, c config.Config, index int, reader *bufio.Reader, ui *terminalUI) (bool, error) {
+	d := c.Database
+	if d == nil || index < 0 || index >= len(d.Databases) {
+		return false, fmt.Errorf("database is not configured")
+	}
+	name := d.Databases[index].Name
+	if !yesNo(selectOption(reader, ui, "Delete database "+name+" and all its tables and ACLs?", "n", "y", "n")) {
+		return false, nil
+	}
+	d.Databases = append(d.Databases[:index], d.Databases[index+1:]...)
+	if d.Name == name {
+		// The legacy shorthand is materialized into Databases by
+		// ensureDeclarativeDatabase. Clear it too, or the deleted database
+		// would reappear on the next reload.
+		d.Name = ""
+		d.User = ""
+		d.PasswordEnv = ""
+	}
+	d.Permissions = filterDatabasePermissionsByDatabase(d.Permissions, name)
+	d.ACL = filterDatabasePermissionsByDatabase(d.ACL, name)
+	if err := config.Write(path, c); err != nil {
+		return false, err
+	}
+	ui.success("Database deleted; its users were kept")
+	return true, nil
+}
+
+func filterDatabasePermissionsByDatabase(permissions []config.DatabasePermission, database string) []config.DatabasePermission {
+	filtered := permissions[:0]
+	for _, permission := range permissions {
+		if permission.Database != database {
+			filtered = append(filtered, permission)
+		}
+	}
+	return filtered
 }
 
 func databaseIndex(d config.Database, name string) int {

@@ -213,6 +213,48 @@ func TestTUIDatabaseManagerSetsACLForExistingUser(t *testing.T) {
 	}
 }
 
+func TestTUIDatabaseManagerDeletesDatabaseAndItsACLs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-delete.json")
+	c := config.Default()
+	c.Database.Databases = []config.DatabaseSpec{
+		{Name: "example", Owner: "example"},
+		{Name: "analytics", Owner: "example", Tables: []config.DatabaseTable{{Name: "events", Columns: []config.DatabaseColumn{{Name: "id", Type: "BIGINT"}}}}},
+	}
+	c.Database.Permissions = []config.DatabasePermission{
+		{User: "example", Database: "analytics", Privileges: []string{"SELECT"}},
+	}
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n3\n4\ny\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Databases) != 1 || got.Database.Databases[0].Name != "example" {
+		t.Fatalf("databases after delete = %#v, want only example", got.Database)
+	}
+	if len(got.Database.Permissions) != 0 {
+		t.Fatalf("permissions after delete = %#v, want ACLs for analytics removed", got.Database.Permissions)
+	}
+	var secondOut bytes.Buffer
+	secondIn := bytes.NewBufferString("12\n2\n4\ny\n0\n")
+	if err := Run([]string{"tui", "-f", path}, secondIn, &secondOut, &secondOut); err != nil {
+		t.Fatal(err)
+	}
+	got, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Databases) != 0 || got.Database.Name != "" {
+		t.Fatalf("legacy database after delete = %#v, want no database shorthand", got.Database)
+	}
+}
+
 func TestTUIDatabaseUserManagementCreatesUser(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "database-user.json")
 	if err := config.WriteDefault(path); err != nil {
