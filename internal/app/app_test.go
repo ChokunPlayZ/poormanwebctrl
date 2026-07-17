@@ -474,10 +474,12 @@ func TestTUIConfiguresPostgresReplica(t *testing.T) {
 
 func TestGuidedReplicaSetupSupportsSameMachine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "existing.json")
-	if err := config.WriteDefault(path); err != nil {
+	c := config.Default()
+	c.Database.Provider = "postgresql"
+	if err := config.Write(path, c); err != nil {
 		t.Fatal(err)
 	}
-	in := bytes.NewBufferString("postgresql\n\n\ny\n\n\n\n\n\n\n")
+	in := bytes.NewBufferString("\n\n\n\n\n")
 	var out bytes.Buffer
 	if err := Run([]string{"replica", "setup", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
@@ -486,11 +488,11 @@ func TestGuidedReplicaSetupSupportsSameMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Database == nil || c.Database.Role != "replica" || c.Database.Port != 5433 || c.Database.Replication.PrimaryHost != "127.0.0.1" || c.Database.Replication.PrimaryPort != 5432 {
-		t.Fatalf("database = %#v, want same-machine PostgreSQL replica ports", c.Database)
+	if c.Database == nil || c.Database.Role != "primary" || c.Database.LocalReplica == nil || c.Database.LocalReplica.Port != 5433 {
+		t.Fatalf("database = %#v, want primary with nested same-machine PostgreSQL replica", c.Database)
 	}
-	if c.Database.DataDir == "/var/lib/postgresql/18/main" {
-		t.Fatalf("data_dir = %q, must not reuse the primary default", c.Database.DataDir)
+	if c.Database.LocalReplica.DataDir == "/var/lib/postgresql/18/main" {
+		t.Fatalf("data_dir = %q, must not reuse the primary default", c.Database.LocalReplica.DataDir)
 	}
 }
 
@@ -662,32 +664,31 @@ func TestNormalizeReplicaDatabaseResetsTopologyWhenProviderChanges(t *testing.T)
 
 func TestTUIReplicaSetupKeepsDashboardInputFlow(t *testing.T) {
 	primaryPath := filepath.Join(t.TempDir(), "primary.json")
-	replicaPath := filepath.Join(t.TempDir(), "replica.json")
 	primary := config.Default()
 	primary.Database.Provider = "postgresql"
 	if err := config.Write(primaryPath, primary); err != nil {
 		t.Fatal(err)
 	}
-	input := "10\n" + replicaPath + "\n\n\n\nn\n\n\n\n\n\nn\nn\n0\n"
+	input := "10\n\n\n\n\n\nn\nn\n0\n"
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
 		t.Fatal(err)
 	}
-	c, err := config.Load(replicaPath)
+	c, err := config.Load(primaryPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Database == nil || c.Database.Role != "replica" {
-		t.Fatalf("database = %#v, want replica configuration", c.Database)
+	if c.Database == nil || c.Database.Role != "primary" || c.Database.LocalReplica == nil {
+		t.Fatalf("database = %#v, want primary and local replica in one configuration", c.Database)
 	}
-	if !bytes.Contains(out.Bytes(), []byte("Replica configuration is ready")) {
+	if !bytes.Contains(out.Bytes(), []byte("Primary and local replica are ready")) {
 		t.Fatal("TUI did not return to the replica setup handoff")
 	}
-	if !bytes.Contains(out.Bytes(), []byte("Apply the primary, then the replica now?")) {
-		t.Fatal("TUI offered to apply the replica without applying the primary first")
+	if !bytes.Contains(out.Bytes(), []byte("Apply the combined primary and replica plan now?")) {
+		t.Fatal("TUI did not offer the combined apply")
 	}
-	if !bytes.Contains(out.Bytes(), []byte("config    "+replicaPath)) {
-		t.Fatal("dashboard did not switch to the saved replica configuration")
+	if bytes.Contains(out.Bytes(), []byte("Replica configuration file")) {
+		t.Fatal("TUI still asked for a separate replica configuration file")
 	}
 }
 
@@ -877,18 +878,18 @@ func TestManagedServicePanelShowsEveryDatabaseStatus(t *testing.T) {
 	}
 }
 
-func TestDashboardKeepsReplicaSetupErrorVisible(t *testing.T) {
+func TestDashboardKeepsLocalReplicaSetupErrorVisible(t *testing.T) {
 	dir := t.TempDir()
 	primaryPath := filepath.Join(dir, "primary.json")
 	if err := config.WriteDefault(primaryPath); err != nil {
 		t.Fatal(err)
 	}
-	input := "10\n" + primaryPath + "\n\n0\n"
+	input := "10\nbad user\n\n\n\n\n\n\n0\n"
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(out.Bytes(), []byte("Replica setup unavailable: replica configuration must be different")) {
+	if !bytes.Contains(out.Bytes(), []byte("Replica setup unavailable: save configuration: database replication requires a valid user")) {
 		t.Fatalf("dashboard did not show the replica setup error:\n%s", out.String())
 	}
 	if !bytes.Contains(out.Bytes(), []byte("Press enter to continue")) {

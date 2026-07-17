@@ -65,7 +65,8 @@ func BuiltInCommands() []Command {
 		},
 		{
 			Name: "replica",
-			Usage: "poorman replica setup [-f replica.json] [--from primary.json]\n" +
+			Usage: "poorman replica setup [-f poorman.json]\n" +
+				"poorman replica setup -f remote-replica.json --from primary.json\n" +
 				"poorman replica status [-f poorman.json]\n" +
 				"poorman replica promote [-f poorman.json] [--yes]",
 			Description: "configure and operate database replication",

@@ -43,3 +43,17 @@ func TestDesiredServicesKeepsSeparateDatabaseInstancesVisible(t *testing.T) {
 		t.Fatalf("database services = %#v / %#v", primaryServices[1], replicaServices[1])
 	}
 }
+
+func TestDesiredServicesIncludesNestedLocalReplica(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "primary"
+	c.Database.Replication = config.Replication{User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "127.0.0.1/32", NodeID: 1}
+	c.Database.LocalReplica = &config.LocalReplica{Port: 3307, DataDir: "/var/lib/mysql/poorman-replica-3307", NodeID: 2}
+	services := DesiredServices(c, "/etc/poorman/poorman.json")
+	if len(services) != 3 {
+		t.Fatalf("services = %#v, want web, primary database, and local replica", services)
+	}
+	if services[1].Name != "mariadb" || services[2].Name != "poorman-mariadb-replica-3307" || services[1].ConfigPath != services[2].ConfigPath {
+		t.Fatalf("database services = %#v", services[1:])
+	}
+}

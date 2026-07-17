@@ -28,18 +28,29 @@ type WebServer struct {
 }
 
 type Database struct {
-	Provider    string               `json:"provider"`
-	Role        string               `json:"role,omitempty"`
-	Name        string               `json:"name,omitempty"`
-	User        string               `json:"user,omitempty"`
-	PasswordEnv string               `json:"password_env,omitempty"`
-	DataDir     string               `json:"data_dir,omitempty"`
-	Port        int                  `json:"port,omitempty"`
-	Databases   []DatabaseSpec       `json:"databases,omitempty"`
-	Users       []DatabaseUser       `json:"users,omitempty"`
-	Permissions []DatabasePermission `json:"permissions,omitempty"`
-	ACL         []DatabasePermission `json:"acl,omitempty"`
-	Replication Replication          `json:"replication,omitempty"`
+	Provider     string               `json:"provider"`
+	Role         string               `json:"role,omitempty"`
+	Name         string               `json:"name,omitempty"`
+	User         string               `json:"user,omitempty"`
+	PasswordEnv  string               `json:"password_env,omitempty"`
+	DataDir      string               `json:"data_dir,omitempty"`
+	Port         int                  `json:"port,omitempty"`
+	Databases    []DatabaseSpec       `json:"databases,omitempty"`
+	Users        []DatabaseUser       `json:"users,omitempty"`
+	Permissions  []DatabasePermission `json:"permissions,omitempty"`
+	ACL          []DatabasePermission `json:"acl,omitempty"`
+	Replication  Replication          `json:"replication,omitempty"`
+	LocalReplica *LocalReplica        `json:"local_replica,omitempty"`
+}
+
+// LocalReplica describes a second database process managed on the same host
+// as the primary. Shared replication credentials stay on Database.Replication
+// so the web stack and both database instances have one source of truth.
+type LocalReplica struct {
+	Port    int    `json:"port"`
+	DataDir string `json:"data_dir"`
+	NodeID  int    `json:"node_id,omitempty"`
+	Slot    string `json:"slot,omitempty"`
 }
 
 // DatabaseSpec describes one logical database managed inside an instance.
@@ -249,6 +260,32 @@ func (d Database) ApplicationCredentials() (name, user, passwordEnv string) {
 func (d Database) ManagedPermissions() []DatabasePermission {
 	permissions := append([]DatabasePermission(nil), d.Permissions...)
 	return append(permissions, d.ACL...)
+}
+
+// LocalReplicaDatabase expands the compact same-host declaration into the
+// legacy replica-shaped value used by provider-specific planning code.
+func (d Database) LocalReplicaDatabase() (Database, bool) {
+	if d.LocalReplica == nil {
+		return Database{}, false
+	}
+	replica := d
+	replica.Role = "replica"
+	replica.Port = d.LocalReplica.Port
+	replica.DataDir = d.LocalReplica.DataDir
+	replica.LocalReplica = nil
+	replica.Replication.PrimaryHost = "127.0.0.1"
+	replica.Replication.PrimaryPort = d.Port
+	if replica.Replication.PrimaryPort == 0 {
+		if d.Provider == "postgresql" {
+			replica.Replication.PrimaryPort = 5432
+		} else {
+			replica.Replication.PrimaryPort = 3306
+		}
+	}
+	replica.Replication.AllowedCIDR = ""
+	replica.Replication.NodeID = d.LocalReplica.NodeID
+	replica.Replication.Slot = d.LocalReplica.Slot
+	return replica, true
 }
 
 func Default() Config {
@@ -559,6 +596,43 @@ func (c Config) Validate() error {
 			}
 			if d.Provider == "postgresql" && d.Role == "replica" && !safeManagedPath(d.DataDir) {
 				return fmt.Errorf("PostgreSQL replica requires its actual absolute data_dir")
+			}
+		}
+		if local := d.LocalReplica; local != nil {
+			if d.Role != "primary" {
+				return fmt.Errorf("database local_replica requires role=primary")
+			}
+			primaryPort := d.Port
+			if primaryPort == 0 {
+				if d.Provider == "postgresql" {
+					primaryPort = 5432
+				} else {
+					primaryPort = 3306
+				}
+			}
+			if local.Port < 1024 || local.Port > 65535 || local.Port == primaryPort {
+				return fmt.Errorf("database local_replica requires a port between 1024 and 65535 different from the primary port")
+			}
+			if !safeManagedPath(local.DataDir) {
+				return fmt.Errorf("database local_replica requires a separate absolute data_dir")
+			}
+			if d.Provider == "mariadb" {
+				if filepath.Clean(local.DataDir) == "/var/lib/mysql" {
+					return fmt.Errorf("database local_replica cannot use the primary MariaDB data directory")
+				}
+				if local.NodeID < 1 || local.NodeID == d.Replication.NodeID {
+					return fmt.Errorf("database local_replica requires a unique positive MariaDB node_id")
+				}
+				if local.Slot != "" {
+					return fmt.Errorf("database local_replica slot is supported only by PostgreSQL")
+				}
+			} else {
+				if local.NodeID != 0 {
+					return fmt.Errorf("database local_replica node_id is supported only by MariaDB")
+				}
+				if local.Slot == "" || !nameRE.MatchString(local.Slot) {
+					return fmt.Errorf("PostgreSQL local_replica requires a valid slot")
+				}
 			}
 		}
 	}

@@ -105,6 +105,17 @@ func DesiredServices(c config.Config, configPath string) []Service {
 			name = fmt.Sprintf("poorman-mariadb-replica-%d", d.Port)
 		}
 		services = append(services, Service{Key: ServiceKey(configPath, "database"), ConfigPath: configPath, Kind: "database", Name: name, Provider: d.Provider, Role: d.Role, Port: d.Port, DataDir: d.DataDir, Database: d.Name})
+		if replica, ok := d.LocalReplicaDatabase(); ok {
+			replicaName := replica.Provider
+			if replica.Provider == "mariadb" {
+				replicaName = fmt.Sprintf("poorman-mariadb-replica-%d", replica.Port)
+			}
+			services = append(services, Service{
+				Key: ServiceKey(configPath, fmt.Sprintf("database-replica-%d", replica.Port)), ConfigPath: configPath,
+				Kind: "database", Name: replicaName, Provider: replica.Provider, Role: replica.Role,
+				Port: replica.Port, DataDir: replica.DataDir, Database: replica.Name,
+			})
+		}
 	}
 	if c.Access.FTP.Enabled {
 		services = append(services, Service{Key: ServiceKey(configPath, "ftp"), ConfigPath: configPath, Kind: "ftp", Name: "vsftpd"})

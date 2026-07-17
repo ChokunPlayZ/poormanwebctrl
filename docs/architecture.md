@@ -59,9 +59,9 @@ PostgreSQL streaming replication and MariaDB GTID replication share inventory co
 
 PostgreSQL `pg_hba.conf` placement is version/package dependent and authentication trust is security-sensitive. The planner emits the exact CIDR-scoped rule but leaves insertion to the operator. MariaDB receives a managed replication fragment with unique node ID, row binlogs, GTID strict mode, and read-only replicas.
 
-Same-host MariaDB replicas on systemd distributions are separate service instances. The replica has an isolated data directory, configuration, runtime socket/PID directory, log, TCP port, seed snapshot, and backup job. Its unit is ordered after the primary during boot but deliberately has no hard service dependency, allowing either database process to fail without systemd stopping the other. This protects against a database-process failure, not a shared host, disk, kernel, or power failure.
+Same-host MariaDB replicas on systemd distributions are declared beside the primary under `database.local_replica` and expanded into separate service instances during planning. The replica has an isolated data directory, configuration, runtime socket/PID directory, log, TCP port, and seed snapshot. Its unit is ordered after the primary during boot but deliberately has no hard service dependency, allowing either database process to fail without systemd stopping the other. This protects against a database-process failure, not a shared host, disk, kernel, or power failure.
 
-Promotion writes the independent instance's read-only setting to `OFF` and targets its private socket. After the inventory role changes to `primary`, subsequent plans continue managing the same data directory, port, socket, service, and instance-specific backup rather than falling back to the distribution's default MariaDB service.
+Promotion writes the independent instance's read-only setting to `OFF` and targets its private socket. It deliberately does not rewrite the desired topology: operators must fence the failed primary, redirect clients, and replace the failed topology before the next normal apply.
 
 ## Extension points
 

@@ -185,6 +185,9 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if d.Role != "standalone" {
 		addReplication(pn, *d, p)
 	}
+	if localReplica, ok := d.LocalReplicaDatabase(); ok {
+		addReplication(pn, localReplica, p)
+	}
 	if d.Role == "replica" {
 		// MariaDB can have explicitly local accounts on a replica. PostgreSQL
 		// hot standbys cannot write role catalogs, and all ordinary accounts on

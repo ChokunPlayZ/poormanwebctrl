@@ -102,6 +102,11 @@ func Checks(c config.Config, p platform.Platform) []Check {
 			databaseService = fmt.Sprintf("poorman-mariadb-replica-%d", c.Database.Port)
 		}
 		services = append(services, databaseService)
+		if replica, ok := c.Database.LocalReplicaDatabase(); ok {
+			if replica.Provider == "mariadb" {
+				services = append(services, fmt.Sprintf("poorman-mariadb-replica-%d", replica.Port))
+			}
+		}
 	}
 	if c.Access.FTP.Enabled {
 		services = append(services, "vsftpd")

@@ -213,24 +213,45 @@ func ReplicaStatus(c config.Config, p platform.Platform) (plan.Plan, error) {
 		step.Input = query + "\n"
 		result.Add(step)
 	}
+	if c.Database.Role == "primary" {
+		if replica, ok := c.Database.LocalReplicaDatabase(); ok {
+			if replica.Provider == "postgresql" {
+				query := "SELECT status, sender_host, slot_name, latest_end_lsn, latest_end_time FROM pg_stat_wal_receiver;"
+				result.Add(plan.AsUser("Show local PostgreSQL replica status", "postgres", "psql", "-p", strconv.Itoa(replica.Port), "-x", "-c", query))
+			} else {
+				layout := mariaDBReplicaLayout(replica)
+				step := plan.Cmd("Show local MariaDB replica status", "mariadb", true, "--protocol=socket", "--socket="+layout.Socket)
+				step.Input = "SHOW REPLICA STATUS\\G\n"
+				result.Add(step)
+			}
+		}
+	}
 	return result, nil
 }
 
 func PromoteReplica(c config.Config, p platform.Platform) (plan.Plan, error) {
-	if c.Database == nil || c.Database.Role != "replica" {
+	if c.Database == nil {
 		return plan.Plan{}, fmt.Errorf("promotion requires database.role=replica")
 	}
+	database := *c.Database
+	if database.Role != "replica" {
+		local, ok := database.LocalReplicaDatabase()
+		if !ok {
+			return plan.Plan{}, fmt.Errorf("promotion requires database.role=replica or database.local_replica")
+		}
+		database = local
+	}
 	result := plan.Plan{Platform: p.Distro}
-	if c.Database.Provider == "postgresql" {
-		result.Add(plan.AsUser("Promote PostgreSQL replica", "postgres", "pg_ctl", "promote", "-D", databaseDataDir(*c.Database, p)))
+	if database.Provider == "postgresql" {
+		result.Add(plan.AsUser("Promote PostgreSQL replica", "postgres", "pg_ctl", "promote", "-D", databaseDataDir(database, p)))
 	} else {
-		if isLocalMariaDBReplica(*c.Database) {
-			layout := mariaDBReplicaLayout(*c.Database)
-			result.Add(plan.ManagedFile("Persist promoted MariaDB instance as writable", layout.Config, mariaDBInstanceConfig(*c.Database, false), "root", 0o644))
+		if isLocalMariaDBReplica(database) {
+			layout := mariaDBReplicaLayout(database)
+			result.Add(plan.ManagedFile("Persist promoted MariaDB instance as writable", layout.Config, mariaDBInstanceConfig(database, false), "root", 0o644))
 		}
 		step := plan.Cmd("Promote MariaDB replica", "mariadb", true)
-		if isLocalMariaDBReplica(*c.Database) {
-			layout := mariaDBReplicaLayout(*c.Database)
+		if isLocalMariaDBReplica(database) {
+			layout := mariaDBReplicaLayout(database)
 			step.Args = []string{"--protocol=socket", "--socket=" + layout.Socket}
 		}
 		step.Input = "STOP REPLICA;\nRESET REPLICA ALL;\nSET GLOBAL read_only=OFF;\n"

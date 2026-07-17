@@ -146,6 +146,30 @@ func TestAcceptsIndependentSameMachineMariaDBReplica(t *testing.T) {
 	}
 }
 
+func TestAcceptsPrimaryWithNestedLocalMariaDBReplica(t *testing.T) {
+	c := Default()
+	c.Database.Role = "primary"
+	c.Database.Replication = Replication{User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "127.0.0.1/32", NodeID: 1}
+	c.Database.LocalReplica = &LocalReplica{Port: 3307, DataDir: "/var/lib/mysql/poorman-replica-3307", NodeID: 2}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	replica, ok := c.Database.LocalReplicaDatabase()
+	if !ok || replica.Role != "replica" || replica.Replication.PrimaryHost != "127.0.0.1" || replica.Replication.PrimaryPort != 3306 || replica.Replication.NodeID != 2 {
+		t.Fatalf("expanded local replica = %#v", replica)
+	}
+}
+
+func TestNestedLocalReplicaRejectsConflicts(t *testing.T) {
+	c := Default()
+	c.Database.Role = "primary"
+	c.Database.Replication = Replication{User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "127.0.0.1/32", NodeID: 1}
+	c.Database.LocalReplica = &LocalReplica{Port: 3306, DataDir: "/var/lib/mysql", NodeID: 1}
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected conflicting local replica topology to be rejected")
+	}
+}
+
 func TestDatabaseChainValidation(t *testing.T) {
 	c := Default()
 	c.Database = &Database{

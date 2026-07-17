@@ -82,7 +82,11 @@ func BuiltInFeatures() []Feature {
 		FeatureFunc{
 			ID: "database",
 			ValidateConfig: func(c config.Config, p platform.Platform) error {
-				if c.Database != nil && isManagedMariaDBInstance(*c.Database) && p.Family == "alpine" {
+				if c.Database != nil && c.Database.Provider == "mariadb" && p.Family == "alpine" {
+					_, hasLocalReplica := c.Database.LocalReplicaDatabase()
+					if !isManagedMariaDBInstance(*c.Database) && !hasLocalReplica {
+						return nil
+					}
 					return fmt.Errorf("same-machine MariaDB replicas require systemd; Alpine/OpenRC is not supported yet")
 				}
 				return nil

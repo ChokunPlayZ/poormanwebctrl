@@ -727,6 +727,57 @@ func TestSameMachineMariaDBReplicaUsesIndependentService(t *testing.T) {
 	}
 }
 
+func TestOneConfigPlansPrimaryAndLocalMariaDBReplicaWithOpenLiteSpeed(t *testing.T) {
+	c := config.Default()
+	c.WebServer.Provider = "openlitespeed"
+	c.Database.Role = "primary"
+	c.Database.Replication = config.Replication{User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "127.0.0.1/32", NodeID: 1}
+	c.Database.LocalReplica = &config.LocalReplica{Port: 3307, DataDir: "/var/lib/mysql/poorman-replica-3307", NodeID: 2}
+	p, err := Build(c, platform.Platform{Distro: "debian", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryUser, localService, attach, apache := -1, -1, -1, false
+	for i, step := range p.Steps {
+		switch step.Description {
+		case "Create MariaDB replication user":
+			primaryUser = i
+		case "Install independent MariaDB replica service":
+			localService = i
+		case "Attach independent MariaDB replica to local primary":
+			attach = i
+		}
+		if step.Command == "apachectl" || strings.Contains(step.Path, "/apache2/") {
+			apache = true
+		}
+	}
+	if primaryUser < 0 || localService <= primaryUser || attach <= localService {
+		t.Fatalf("combined plan ordering primary=%d local-service=%d attach=%d", primaryUser, localService, attach)
+	}
+	if apache {
+		t.Fatal("OpenLiteSpeed combined plan contains Apache configuration")
+	}
+	status, err := ReplicaStatus(c, platform.Platform{Distro: "debian", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion, err := PromoteReplica(c, platform.Platform{Distro: "debian", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, operation := range map[string]plan.Plan{"status": status, "promotion": promotion} {
+		foundSocket := false
+		for _, step := range operation.Steps {
+			if strings.Contains(strings.Join(step.Args, " "), "--socket=/run/poorman-mariadb-replica-3307/mariadb.sock") {
+				foundSocket = true
+			}
+		}
+		if !foundSocket {
+			t.Errorf("%s does not target the nested local replica socket: %#v", name, operation.Steps)
+		}
+	}
+}
+
 func TestBuildForConfigAddsManagedServiceReconciliation(t *testing.T) {
 	c := config.Default()
 	c.Database.Role = "replica"

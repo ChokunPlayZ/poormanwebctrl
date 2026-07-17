@@ -165,6 +165,79 @@ func promptPort(reader *bufio.Reader, ui *terminalUI, label string, current, fal
 	return value
 }
 
+func guidedLocalReplicaSetup(path string, in io.Reader, out io.Writer) error {
+	c, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if c.Database == nil {
+		return fmt.Errorf("local replica setup requires a configured database")
+	}
+	if c.Database.Role == "replica" {
+		return fmt.Errorf("this configuration already describes a replica; use the primary configuration for local replica setup")
+	}
+	ui, usingParentUI := out.(*terminalUI)
+	if !usingParentUI {
+		ui = newTerminalUI(out)
+		attachTerminalInput(ui, in)
+	}
+	previousConfirm := ui.confirmSetupCancel
+	ui.confirmSetupCancel = true
+	defer func() { ui.confirmSetupCancel = previousConfirm }()
+	reader := inputReader(in)
+	ui.brand("guided local replica setup", "Add an independent replica process to this configuration")
+
+	d := c.Database
+	d.Role = "primary"
+	d.Replication.User = prompt(reader, ui, "Replication user", defaultValue(d.Replication.User, "replicator"))
+	d.Replication.PasswordEnv = prompt(reader, ui, "Replication password environment variable", defaultValue(d.Replication.PasswordEnv, "POORMAN_REPLICATION_PASSWORD"))
+	d.Replication.AllowedCIDR = "127.0.0.1/32"
+	primaryPort := d.Port
+	if primaryPort == 0 {
+		if d.Provider == "postgresql" {
+			primaryPort = 5432
+		} else {
+			primaryPort = 3306
+		}
+	}
+	local := d.LocalReplica
+	if local == nil {
+		local = &config.LocalReplica{}
+	}
+	if d.Provider == "mariadb" {
+		primaryNodeDefault := d.Replication.NodeID
+		if primaryNodeDefault < 1 {
+			primaryNodeDefault = 1
+		}
+		d.Replication.NodeID, _ = strconv.Atoi(prompt(reader, ui, "MariaDB primary node ID", strconv.Itoa(primaryNodeDefault)))
+		local.Port = promptPort(reader, ui, "Local replica database port", local.Port, primaryPort+1)
+		local.DataDir = prompt(reader, ui, "Local replica data directory", defaultValue(local.DataDir, fmt.Sprintf("/var/lib/mysql/poorman-replica-%d", local.Port)))
+		nodeDefault := local.NodeID
+		if nodeDefault < 1 || nodeDefault == d.Replication.NodeID {
+			nodeDefault = d.Replication.NodeID + 1
+		}
+		local.NodeID, _ = strconv.Atoi(prompt(reader, ui, "MariaDB replica node ID", strconv.Itoa(nodeDefault)))
+		local.Slot = ""
+	} else {
+		local.Port = promptPort(reader, ui, "Local replica database port", local.Port, primaryPort+1)
+		local.DataDir = prompt(reader, ui, "Local replica data directory", defaultValue(local.DataDir, "/var/lib/postgresql/poorman-replica"))
+		local.Slot = prompt(reader, ui, "PostgreSQL replication slot", defaultValue(local.Slot, "poorman_replica_1"))
+		local.NodeID = 0
+		d.Replication.Slot = local.Slot
+	}
+	if ui.setupCanceled {
+		ui.muted("Cancelled.")
+		return errSetupCanceled
+	}
+	d.LocalReplica = local
+	if err := config.Write(path, c); err != nil {
+		return fmt.Errorf("save configuration: %w", err)
+	}
+	ui.success(fmt.Sprintf("Local replica added to %s", path))
+	ui.muted(fmt.Sprintf("Preview and apply both database instances with: poorman plan -f %s", path))
+	return nil
+}
+
 func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("replica setup", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -178,6 +251,11 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	}
 	if err := requireNoArgs(fs); err != nil {
 		return err
+	}
+	if *from == "" {
+		if existing, loadErr := config.Load(*path); loadErr == nil && existing.Database != nil && existing.Database.Role != "replica" {
+			return guidedLocalReplicaSetup(*path, in, out)
+		}
 	}
 	c := config.Default()
 	var sourceConfig *config.Config
@@ -439,10 +517,7 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 				pause(reader, ui)
 			}
 		case "10":
-			replicaPath, err := guidedReplicaSetupTUI(ctx, path, reader, ui)
-			if replicaPath != "" {
-				path = replicaPath
-			}
+			err := guidedReplicaSetupTUI(ctx, path, reader, ui)
 			if err != nil {
 				ui.warn("Replica setup unavailable: " + err.Error())
 				pause(reader, ui)
@@ -466,51 +541,37 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 	}
 }
 
-func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) (string, error) {
+func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) error {
 	previousConfirm := ui.confirmSetupCancel
 	ui.confirmSetupCancel = true
 	defer func() { ui.confirmSetupCancel = previousConfirm }()
 	ui.clear()
-	ui.brand("guided replica setup", "Create a separate replica configuration from this stack")
-	defaultPath := filepath.Join(filepath.Dir(primaryPath), "replica.json")
-	replicaPath := filepath.Clean(prompt(reader, ui, "Replica configuration file", defaultPath))
-	if ui.setupCanceled {
-		ui.muted("Cancelled.")
-		ui.setupCanceled = false
-		return "", nil
-	}
-	if replicaPath == filepath.Clean(primaryPath) {
-		return "", fmt.Errorf("replica configuration must be different from the primary configuration")
-	}
-	if err := guidedReplicaSetup([]string{"-f", replicaPath, "--from", primaryPath}, reader, ui); err != nil {
+	ui.brand("guided local replica setup", "Manage the primary and local replica from this stack")
+	if err := guidedLocalReplicaSetup(primaryPath, reader, ui); err != nil {
 		if errors.Is(err, errSetupCanceled) {
 			ui.setupCanceled = false
-			return "", nil
+			return nil
 		}
-		return "", err
+		return err
 	}
 	// The setup itself is now saved. The remaining preview/apply questions use
 	// the normal Ctrl+C behavior for operations.
 	ui.confirmSetupCancel = false
-	if yesNo(selectOption(reader, ui, "Preview the primary and replica plans now?", "y", "y", "n")) {
+	if yesNo(selectOption(reader, ui, "Preview the combined primary and replica plan now?", "y", "y", "n")) {
 		if err := planCommand([]string{"-f", primaryPath}, ui); err != nil {
-			return replicaPath, err
-		}
-		if err := planCommand([]string{"-f", replicaPath}, ui); err != nil {
-			return replicaPath, err
+			return err
 		}
 	}
-	if yesNo(selectOption(reader, ui, "Apply the primary, then the replica now?", "n", "y", "n")) {
+	if yesNo(selectOption(reader, ui, "Apply the combined primary and replica plan now?", "n", "y", "n")) {
 		// The guided prompt is already the user's confirmation. Passing --yes
 		// avoids asking for a second confirmation and consuming the next TUI input.
 		if err := applyCommand(ctx, []string{"-f", primaryPath, "--yes"}, reader, ui, ui); err != nil {
-			return replicaPath, err
+			return err
 		}
-		return replicaPath, applyCommand(ctx, []string{"-f", replicaPath, "--yes"}, reader, ui, ui)
+		return nil
 	}
-	ui.muted(fmt.Sprintf("Replica configuration is ready; apply the primary first: poorman apply -f %s", primaryPath))
-	ui.muted(fmt.Sprintf("Then apply the replica: poorman apply -f %s", replicaPath))
-	return replicaPath, nil
+	ui.muted(fmt.Sprintf("Primary and local replica are ready: poorman apply -f %s", primaryPath))
+	return nil
 }
 
 func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
