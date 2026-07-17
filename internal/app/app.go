@@ -694,7 +694,14 @@ func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		ui.brand("Stack settings", "Adjust the platform after initial setup")
 		ui.panel("CURRENT", fmt.Sprintf("web       %s\ndatabase  %s\ntls       %s\nfirewall  %s\nbackups   %s", c.WebServer.Provider, databaseLabel(c), enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled)))
 		ui.panel("ACTIONS", "1  web server\n2  database and replication\n3  TLS and certificate email\n4  firewall\n5  backups\n0  back")
-		switch selectOption(reader, ui, "Stack settings", "1", "1", "2", "3", "4", "5", "0") {
+		switch selectMenu(reader, ui, "Stack settings", "1",
+			selectorChoice{Value: "1", Label: "web server"},
+			selectorChoice{Value: "2", Label: "database and replication"},
+			selectorChoice{Value: "3", Label: "TLS and certificate email"},
+			selectorChoice{Value: "4", Label: "firewall"},
+			selectorChoice{Value: "5", Label: "backups"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
 		case "1":
 			c.WebServer.Provider = selectOption(reader, ui, "Web server", c.WebServer.Provider, "nginx", "apache", "openlitespeed")
 		case "2":
@@ -829,7 +836,12 @@ func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *te
 			ui.panel("REPLICA", "This database is read-only. Manage tables and permissions on the primary.")
 		}
 		ui.panel("ACTIONS", "1  create table\n2  set user permissions\n3  view current ACLs\n0  back")
-		choice := selectOption(reader, ui, "Database / "+database.Name, "1", "1", "2", "3", "0")
+		choice := selectMenu(reader, ui, "Database / "+database.Name, "1",
+			selectorChoice{Value: "1", Label: "create table"},
+			selectorChoice{Value: "2", Label: "set user permissions"},
+			selectorChoice{Value: "3", Label: "view current ACLs"},
+			selectorChoice{Value: "0", Label: "back"},
+		)
 		switch choice {
 		case "1":
 			if c.Database.Role == "replica" {
@@ -1033,7 +1045,14 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 		ui.brand("Guardrails & backups", "Turn on the protections that keep a live server recoverable")
 		ui.panel("CURRENT", fmt.Sprintf("https       %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s", enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured")))
 		ui.panel("ACTIONS", "1  HTTPS and certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n0  back")
-		switch selectOption(reader, ui, "Guardrails & backups", "1", "1", "2", "3", "4", "5", "0") {
+		switch selectMenu(reader, ui, "Guardrails & backups", "1",
+			selectorChoice{Value: "1", Label: "HTTPS and certificate email"},
+			selectorChoice{Value: "2", Label: "firewall"},
+			selectorChoice{Value: "3", Label: "backups and schedule"},
+			selectorChoice{Value: "4", Label: "run backup now"},
+			selectorChoice{Value: "5", Label: "backup inventory"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
 		case "1":
 			c.TLS.Enabled = yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", enabledDefault(c.TLS.Enabled), "y", "n"))
 			if c.TLS.Enabled {
@@ -1177,7 +1196,12 @@ func vhostsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 			}
 		}
 		ui.panel("ACTIONS", "1  add virtual host\n2  edit virtual host\n3  remove virtual host\n0  back")
-		switch selectOption(reader, ui, "Virtual hosts", "1", "1", "2", "3", "0") {
+		switch selectMenu(reader, ui, "Virtual hosts", "1",
+			selectorChoice{Value: "1", Label: "add virtual host"},
+			selectorChoice{Value: "2", Label: "edit virtual host"},
+			selectorChoice{Value: "3", Label: "remove virtual host"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
 		case "1":
 			if err := addVHost(path, c, reader, ui); err != nil {
 				ui.warn(err.Error())
@@ -1318,7 +1342,12 @@ func operationsTUI(ctx context.Context, c config.Config, path string, reader *bu
 			backupAction += " (disabled)"
 		}
 		ui.panel("ACTIONS", "1  host resource stats\n2  recent service logs\n3  "+backupAction+"\n0  back")
-		switch selectOption(reader, ui, "Long-term operations", "1", "1", "2", "3", "0") {
+		switch selectMenu(reader, ui, "Long-term operations", "1",
+			selectorChoice{Value: "1", Label: "host resource stats"},
+			selectorChoice{Value: "2", Label: "recent service logs"},
+			selectorChoice{Value: "3", Label: backupAction},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
 		case "1":
 			ui.clear()
 			ui.brand("Host resource stats", "A point-in-time view of capacity and service failures")
@@ -1479,7 +1508,13 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 			policySuffix = " (disabled)"
 		}
 		ui.panel("ACTIONS", "1  show firewall status\n2  preview configured policy"+policySuffix+"\n3  apply configured policy"+policySuffix+"\n4  disable firewall\n0  back")
-		switch selectOption(reader, ui, "Firewall management", "1", "1", "2", "3", "4", "0") {
+		switch selectMenu(reader, ui, "Firewall management", "1",
+			selectorChoice{Value: "1", Label: "show firewall status"},
+			selectorChoice{Value: "2", Label: "preview configured policy" + policySuffix},
+			selectorChoice{Value: "3", Label: "apply configured policy" + policySuffix},
+			selectorChoice{Value: "4", Label: "disable firewall"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
 		case "1":
 			operation, err := provider.FirewallStatus(p)
 			if err != nil {
@@ -1720,7 +1755,21 @@ func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c confi
 		}
 	}
 	ui.dashboard(c, path)
-	return selectOption(reader, ui, "Select action", "1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "0")
+	return selectMenu(reader, ui, "Select action", "1",
+		selectorChoice{Value: "1", Label: "preview plan"},
+		selectorChoice{Value: "2", Label: "apply changes"},
+		selectorChoice{Value: "3", Label: "health check"},
+		selectorChoice{Value: "4", Label: "backup and restore"},
+		selectorChoice{Value: "5", Label: "replication"},
+		selectorChoice{Value: "6", Label: "firewall"},
+		selectorChoice{Value: "7", Label: "long-term operations"},
+		selectorChoice{Value: "8", Label: "virtual hosts"},
+		selectorChoice{Value: "9", Label: "stack settings"},
+		selectorChoice{Value: "10", Label: "guided replica setup"},
+		selectorChoice{Value: "11", Label: "guardrails and backups"},
+		selectorChoice{Value: "12", Label: "database management"},
+		selectorChoice{Value: "0", Label: "exit"},
+	)
 }
 
 func rawTerminalAvailable(file *os.File) bool {
@@ -1841,6 +1890,23 @@ func prompt(reader *bufio.Reader, out io.Writer, label, fallback string) string 
 // sessions get a real arrow-key selector; pipes, tests, and scripted setup
 // retain a deterministic numbered/value input mode.
 func selectOption(reader *bufio.Reader, ui *terminalUI, label, fallback string, options ...string) string {
+	choices := make([]selectorChoice, 0, len(options))
+	for _, option := range options {
+		choices = append(choices, selectorChoice{Value: option, Label: option})
+	}
+	return selectChoices(reader, ui, label, fallback, choices...)
+}
+
+type selectorChoice struct {
+	Value string
+	Label string
+}
+
+func selectMenu(reader *bufio.Reader, ui *terminalUI, label, fallback string, options ...selectorChoice) string {
+	return selectChoices(reader, ui, label, fallback, options...)
+}
+
+func selectChoices(reader *bufio.Reader, ui *terminalUI, label, fallback string, options ...selectorChoice) string {
 	if len(options) == 0 {
 		return prompt(reader, ui, label, fallback)
 	}
@@ -1851,7 +1917,7 @@ func selectOption(reader *bufio.Reader, ui *terminalUI, label, fallback string, 
 	}
 	fmt.Fprintf(ui, "%s [%s]\n", label, fallback)
 	for i, option := range options {
-		fmt.Fprintf(ui, "  %d  %s\n", i+1, option)
+		fmt.Fprintf(ui, "  %d  %s\n", i+1, option.Label)
 	}
 	answer, err := reader.ReadString('\n')
 	if err == io.EOF {
@@ -1864,22 +1930,22 @@ func selectOption(reader *bufio.Reader, ui *terminalUI, label, fallback string, 
 	return selectedOptionValue(answer, fallback, options)
 }
 
-func selectedOptionValue(answer, fallback string, options []string) string {
+func selectedOptionValue(answer, fallback string, options []selectorChoice) string {
 	for i, option := range options {
-		if answer == strconv.Itoa(i+1) || strings.EqualFold(answer, option) {
-			return option
+		if answer == strconv.Itoa(i+1) || strings.EqualFold(answer, option.Value) || strings.EqualFold(answer, option.Label) {
+			return option.Value
 		}
 	}
 	lower := strings.ToLower(answer)
 	for _, option := range options {
-		if (lower == "yes" && strings.EqualFold(option, "y")) || (lower == "no" && strings.EqualFold(option, "n")) {
-			return option
+		if (lower == "yes" && strings.EqualFold(option.Value, "y")) || (lower == "no" && strings.EqualFold(option.Value, "n")) {
+			return option.Value
 		}
 	}
 	return fallback
 }
 
-func rawSelectOption(ui *terminalUI, label, fallback string, options []string) (string, bool) {
+func rawSelectOption(ui *terminalUI, label, fallback string, options []selectorChoice) (string, bool) {
 	file := ui.input
 	getState := exec.Command("stty", "-g")
 	getState.Stdin = file
@@ -1900,7 +1966,7 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []string) (
 
 	selected := 0
 	for i, option := range options {
-		if strings.EqualFold(option, fallback) {
+		if strings.EqualFold(option.Value, fallback) {
 			selected = i
 			break
 		}
@@ -1913,7 +1979,7 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []string) (
 			if i == selected {
 				marker = "> "
 			}
-			fmt.Fprintf(ui, "%s%d  %s\n", marker, i+1, option)
+			fmt.Fprintf(ui, "%s%s\n", marker, option.Label)
 		}
 		fmt.Fprintln(ui, ui.paint("38;5;244", "Use ↑/↓ and Enter"))
 	}
@@ -1925,8 +1991,8 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []string) (
 		}
 		switch b {
 		case '\r', '\n':
-			fmt.Fprintf(ui, "Selected: %s\n", options[selected])
-			return options[selected], true
+			fmt.Fprintf(ui, "Selected: %s\n", options[selected].Label)
+			return options[selected].Value, true
 		case 'q', 'Q':
 			return escapeOption(fallback, options), true
 		case 'k':
@@ -1999,10 +2065,10 @@ func readRawMaybeByte(file *os.File) (byte, bool) {
 	return 0, false
 }
 
-func escapeOption(fallback string, options []string) string {
+func escapeOption(fallback string, options []selectorChoice) string {
 	for _, option := range options {
-		if option == "0" {
-			return option
+		if option.Value == "0" {
+			return option.Value
 		}
 	}
 	return fallback
