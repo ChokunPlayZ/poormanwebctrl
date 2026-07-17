@@ -1455,7 +1455,7 @@ func parsePositive(value string) (int, error) {
 }
 
 func pause(reader *bufio.Reader, ui *terminalUI) {
-	selectOption(reader, ui, "Press enter to continue", "0", "0")
+	prompt(reader, ui, "Press enter to continue", "")
 }
 
 func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
