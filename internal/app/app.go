@@ -245,6 +245,7 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 		return err
 	}
 	ui := newTerminalUI(out)
+	attachTerminalInput(ui, in)
 	if _, err := os.Stat(*path); err == nil {
 		return tuiDashboard(ctx, *path, in, ui)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -255,32 +256,32 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 	ui.clear()
 	ui.brand("guided setup", "Build a safe, auditable server configuration")
 	ui.panel("WEB SERVER", "1  nginx                 recommended\n2  apache\n3  openlitespeed")
-	choice := prompt(reader, ui, "Selection", "1")
+	choice := selectOption(reader, ui, "Web server", "1", "nginx", "apache", "openlitespeed")
 	providerName := "nginx"
-	if choice == "2" {
+	if choice == "apache" || choice == "2" {
 		providerName = "apache"
-	} else if choice == "3" {
+	} else if choice == "openlitespeed" || choice == "3" {
 		providerName = "openlitespeed"
 	}
 
 	domain := prompt(reader, ui, "First site domain", "example.com")
 	root := prompt(reader, ui, "Document root", "/var/www/"+domain)
 	owner := prompt(reader, ui, "System/SFTP user", "webadmin")
-	runtimeName := prompt(reader, ui, "Runtime (php/static)", "php")
-	dbChoice := prompt(reader, ui, "Database (mariadb/postgresql/none)", "mariadb")
+	runtimeName := selectOption(reader, ui, "Runtime", "php", "php", "static")
+	dbChoice := selectOption(reader, ui, "Database", "mariadb", "mariadb", "postgresql", "none")
 	var database *config.Database
 	if dbChoice != "none" {
-		database = &config.Database{Provider: dbChoice, Role: strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", "standalone")), Name: prompt(reader, ui, "Database name", "website"), User: prompt(reader, ui, "Database user", "website"), PasswordEnv: "POORMAN_DB_PASSWORD"}
+		database = &config.Database{Provider: dbChoice, Role: strings.ToLower(selectOption(reader, ui, "Database role", "standalone", "standalone", "primary", "replica")), Name: prompt(reader, ui, "Database name", "website"), User: prompt(reader, ui, "Database user", "website"), PasswordEnv: "POORMAN_DB_PASSWORD"}
 		if err := configureReplication(reader, ui, database); err != nil {
 			return err
 		}
 	}
 	var wordpress *config.WordPress
-	if runtimeName == "php" && database != nil && database.Role != "replica" && yesNo(prompt(reader, ui, "Install WordPress? (y/N)", "n")) {
+	if runtimeName == "php" && database != nil && database.Role != "replica" && yesNo(selectOption(reader, ui, "Install WordPress?", "n", "y", "n")) {
 		wordpress = &config.WordPress{Title: domain, AdminUser: "admin", AdminEmail: prompt(reader, ui, "WordPress admin email", "admin@"+domain), AdminPassEnv: "POORMAN_WP_ADMIN_PASSWORD"}
 	}
-	tlsEnabled := yesNo(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", "y"))
-	backupEnabled := yesNo(prompt(reader, ui, "Enable nightly backups? (Y/n)", "y"))
+	tlsEnabled := yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", "y", "y", "n"))
+	backupEnabled := yesNo(selectOption(reader, ui, "Enable nightly backups?", "y", "y", "n"))
 
 	c := config.Config{
 		Version:   1,
@@ -321,7 +322,7 @@ func configureReplication(reader *bufio.Reader, ui *terminalUI, database *config
 		return nil
 	}
 	if database.Role == "replica" {
-		local := yesNo(prompt(reader, ui, "Is the primary on this machine? (y/N)", "n"))
+		local := yesNo(selectOption(reader, ui, "Is the primary on this machine?", "n", "y", "n"))
 		primaryHostDefault := "10.20.0.10"
 		if local {
 			primaryHostDefault = "127.0.0.1"
@@ -415,13 +416,14 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		return statErr
 	}
 	ui := newTerminalUI(out)
+	attachTerminalInput(ui, in)
 	reader := inputReader(in)
 	ui.brand("guided replica setup", "Attach a database replica with safe same-machine defaults")
 	providerName := "mariadb"
 	if c.Database != nil {
 		providerName = c.Database.Provider
 	}
-	providerName = strings.ToLower(prompt(reader, ui, "Database (mariadb/postgresql)", providerName))
+	providerName = strings.ToLower(selectOption(reader, ui, "Database", providerName, "mariadb", "postgresql"))
 	if sourceConfig != nil && sourceConfig.Database != nil && sourceConfig.Database.Provider != providerName {
 		return fmt.Errorf("replica database provider %q must match source provider %q", providerName, sourceConfig.Database.Provider)
 	}
@@ -659,7 +661,7 @@ func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufi
 	if err := guidedReplicaSetup([]string{"-f", replicaPath, "--from", primaryPath}, reader, ui); err != nil {
 		return "", err
 	}
-	if yesNo(prompt(reader, ui, "Preview the primary and replica plans now? (Y/n)", "y")) {
+	if yesNo(selectOption(reader, ui, "Preview the primary and replica plans now?", "y", "y", "n")) {
 		if err := planCommand([]string{"-f", primaryPath}, ui); err != nil {
 			return replicaPath, err
 		}
@@ -667,7 +669,7 @@ func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufi
 			return replicaPath, err
 		}
 	}
-	if yesNo(prompt(reader, ui, "Apply the primary, then the replica now? (y/N)", "n")) {
+	if yesNo(selectOption(reader, ui, "Apply the primary, then the replica now?", "n", "y", "n")) {
 		// The guided prompt is already the user's confirmation. Passing --yes
 		// avoids asking for a second confirmation and consuming the next TUI input.
 		if err := applyCommand(ctx, []string{"-f", primaryPath, "--yes"}, reader, ui, ui); err != nil {
@@ -690,9 +692,9 @@ func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		ui.brand("Stack settings", "Adjust the platform after initial setup")
 		ui.panel("CURRENT", fmt.Sprintf("web       %s\ndatabase  %s\ntls       %s\nfirewall  %s\nbackups   %s", c.WebServer.Provider, databaseLabel(c), enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled)))
 		ui.panel("ACTIONS", "1  web server\n2  database and replication\n3  TLS and certificate email\n4  firewall\n5  backups\n0  back")
-		switch prompt(reader, ui, "Select action", "1") {
+		switch selectOption(reader, ui, "Stack settings", "1", "1", "2", "3", "4", "5", "0") {
 		case "1":
-			c.WebServer.Provider = strings.ToLower(prompt(reader, ui, "Web server (nginx/apache/openlitespeed)", c.WebServer.Provider))
+			c.WebServer.Provider = selectOption(reader, ui, "Web server", c.WebServer.Provider, "nginx", "apache", "openlitespeed")
 		case "2":
 			if err := adjustDatabase(&c, reader, ui); err != nil {
 				ui.warn(err.Error())
@@ -700,14 +702,14 @@ func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 				continue
 			}
 		case "3":
-			c.TLS.Enabled = yesNo(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", enabledDefault(c.TLS.Enabled)))
+			c.TLS.Enabled = yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", enabledDefault(c.TLS.Enabled), "y", "n"))
 			if c.TLS.Enabled {
 				c.TLS.Email = prompt(reader, ui, "Certificate email", c.TLS.Email)
 			}
 		case "4":
-			c.Firewall.Enabled = yesNo(prompt(reader, ui, "Enable firewall? (Y/n)", enabledDefault(c.Firewall.Enabled)))
+			c.Firewall.Enabled = yesNo(selectOption(reader, ui, "Enable firewall?", enabledDefault(c.Firewall.Enabled), "y", "n"))
 		case "5":
-			c.Backups.Enabled = yesNo(prompt(reader, ui, "Enable nightly backups? (Y/n)", enabledDefault(c.Backups.Enabled)))
+			c.Backups.Enabled = yesNo(selectOption(reader, ui, "Enable nightly backups?", enabledDefault(c.Backups.Enabled), "y", "n"))
 			if c.Backups.Enabled {
 				c.Backups.Destination = prompt(reader, ui, "Backup destination", c.Backups.Destination)
 				c.Backups.Schedule = prompt(reader, ui, "Backup schedule", c.Backups.Schedule)
@@ -737,114 +739,264 @@ func databaseManagementTUI(path string, reader *bufio.Reader, ui *terminalUI) er
 			return fmt.Errorf("database is not configured")
 		}
 		d := c.Database
+		ensureDeclarativeDatabase(d)
 		ui.clear()
-		ui.brand("Database management", "Declare databases, users, tables, and least-privilege grants")
+		ui.brand("Database management", "Select a database to manage its tables and permissions")
 		if d.Role == "replica" {
 			ui.panel("REPLICA", "This database is read-only. Schema, users, and grants are sourced from the primary through replication.")
 		}
 		databases := d.ManagedDatabases()
-		users := d.ManagedUsers()
-		tables := 0
+		options := []string{"Create new database"}
 		for _, database := range databases {
-			tables += len(database.Tables)
+			options = append(options, database.Name)
 		}
-		ui.panel("CURRENT", fmt.Sprintf("provider   %s (%s)\ndatabases  %d\nusers      %d\ntables     %d\ngrants     %d", d.Provider, defaultValue(d.Role, "standalone"), len(databases), len(users), tables, len(d.ManagedPermissions())))
-		ui.panel("ACTIONS", "1  add database\n2  add database user\n3  add table\n4  add permission / ACL\n0  back")
-		switch prompt(reader, ui, "Select action", "1") {
-		case "1":
+		options = append(options, "0")
+		choice := selectOption(reader, ui, "Database", options[0], options...)
+		switch {
+		case choice == "Create new database":
 			if d.Role == "replica" {
 				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
 				pause(reader, ui)
 				continue
 			}
-			ensureDeclarativeDatabase(d)
-			name := prompt(reader, ui, "Database name", "app")
-			owner := prompt(reader, ui, "Database owner/user", firstDatabaseUser(*d))
-			d.Databases = append(d.Databases, config.DatabaseSpec{Name: name, Owner: owner})
-			if err := config.Write(path, c); err != nil {
+			if err := createManagedDatabase(path, c, reader, ui); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
-				continue
 			}
-			ui.success("Database added")
-		case "2":
-			if d.Role == "replica" {
-				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
-				pause(reader, ui)
-				continue
-			}
-			ensureDeclarativeDatabase(d)
-			name := prompt(reader, ui, "Database user", "app_user")
-			passwordEnv := prompt(reader, ui, "Password environment variable", "POORMAN_DB_PASSWORD")
-			host := ""
-			if d.Provider == "mariadb" {
-				host = prompt(reader, ui, "MariaDB host (localhost/%/IP)", "localhost")
-			}
-			d.Users = append(d.Users, config.DatabaseUser{Name: name, PasswordEnv: passwordEnv, Host: host})
-			if err := config.Write(path, c); err != nil {
-				ui.warn(err.Error())
-				pause(reader, ui)
-				continue
-			}
-			ui.success("Database user added")
-		case "3":
-			if d.Role == "replica" {
-				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
-				pause(reader, ui)
-				continue
-			}
-			ensureDeclarativeDatabase(d)
-			databaseIndex, err := chooseDatabase(*d, reader, ui)
-			if err != nil {
-				ui.warn(err.Error())
-				pause(reader, ui)
-				continue
-			}
-			table := config.DatabaseTable{Name: prompt(reader, ui, "Table name", "items")}
-			if d.Provider == "postgresql" {
-				table.Schema = prompt(reader, ui, "Schema", "public")
-			}
-			columns, err := parseDatabaseColumns(prompt(reader, ui, "Columns name:TYPE (comma-separated)", "id:BIGINT"))
-			if err != nil {
-				ui.warn(err.Error())
-				pause(reader, ui)
-				continue
-			}
-			table.Columns = columns
-			table.PrimaryKey = parseAliases(prompt(reader, ui, "Primary key columns (comma-separated)", ""))
-			d.Databases[databaseIndex].Tables = append(d.Databases[databaseIndex].Tables, table)
-			if err := config.Write(path, c); err != nil {
-				ui.warn(err.Error())
-				pause(reader, ui)
-				continue
-			}
-			ui.success("Table added")
-		case "4":
-			if d.Role == "replica" {
-				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
-				pause(reader, ui)
-				continue
-			}
-			ensureDeclarativeDatabase(d)
-			user := prompt(reader, ui, "Database user", firstDatabaseUser(*d))
-			database := prompt(reader, ui, "Database", firstDatabaseName(*d))
-			permission := config.DatabasePermission{User: user, Database: database}
-			permission.Schema = prompt(reader, ui, "Schema (blank for database-wide)", "")
-			permission.Table = prompt(reader, ui, "Table (blank for schema/database-wide)", "")
-			permission.Privileges = parseAliases(prompt(reader, ui, "Privileges (comma-separated)", "SELECT"))
-			permission.GrantOption = yesNo(prompt(reader, ui, "Allow this user to grant onward? (y/N)", "n"))
-			d.Permissions = append(d.Permissions, permission)
-			if err := config.Write(path, c); err != nil {
-				ui.warn(err.Error())
-				pause(reader, ui)
-				continue
-			}
-			ui.success("Permission added")
-		case "0", "q", "Q":
+		case choice == "0":
 			return nil
 		default:
-			ui.warn("Unknown selection.")
+			if err := selectedDatabaseTUI(path, choice, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
 		}
+	}
+}
+
+func createManagedDatabase(path string, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
+	d := c.Database
+	if d == nil {
+		return fmt.Errorf("database is not configured")
+	}
+	ensureDeclarativeDatabase(d)
+	name := prompt(reader, ui, "New database name", "app")
+	owner := ""
+	createUserChoice := selectOption(reader, ui, "Create a new database user for this database?", "n", "y", "n", "0")
+	if createUserChoice == "0" {
+		return nil
+	}
+	if yesNo(createUserChoice) {
+		user := config.DatabaseUser{
+			Name:        prompt(reader, ui, "New database username", name+"_user"),
+			PasswordEnv: prompt(reader, ui, "Password environment variable", "POORMAN_DB_PASSWORD"),
+		}
+		if d.Provider == "mariadb" {
+			user.Host = selectOption(reader, ui, "MariaDB user host", "localhost", "localhost", "%")
+		}
+		d.Users = append(d.Users, user)
+		owner = user.Name
+	}
+	d.Databases = append(d.Databases, config.DatabaseSpec{Name: name, Owner: owner})
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Database created")
+	return nil
+}
+
+func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		if c.Database == nil {
+			return fmt.Errorf("database is not configured")
+		}
+		ensureDeclarativeDatabase(c.Database)
+		index := databaseIndex(*c.Database, databaseName)
+		if index < 0 {
+			return fmt.Errorf("database %q is no longer configured", databaseName)
+		}
+		database := &c.Database.Databases[index]
+		ui.clear()
+		ui.brand("Database / "+database.Name, "Manage tables and access control for the selected database")
+		ui.panel("DATABASE", fmt.Sprintf("provider  %s (%s)\nowner     %s\ntables    %d\nacl rules %d", c.Database.Provider, defaultValue(c.Database.Role, "standalone"), defaultValue(database.Owner, "none"), len(database.Tables), countDatabasePermissions(*c.Database, database.Name)))
+		if c.Database.Role == "replica" {
+			ui.panel("REPLICA", "This database is read-only. Manage tables and permissions on the primary.")
+		}
+		ui.panel("ACTIONS", "1  create table\n2  set user permissions\n3  view current ACLs\n0  back")
+		choice := selectOption(reader, ui, "Database / "+database.Name, "1", "1", "2", "3", "0")
+		switch choice {
+		case "1":
+			if c.Database.Role == "replica" {
+				ui.warn("Replicas are read-only; create the table on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := createTableForDatabase(path, c, index, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "2":
+			if c.Database.Role == "replica" {
+				ui.warn("Replicas are read-only; set permissions on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := setDatabasePermission(path, c, index, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "3":
+			showDatabaseACL(ui, *c.Database, database.Name)
+			pause(reader, ui)
+		case "0":
+			return nil
+		}
+	}
+}
+
+func databaseIndex(d config.Database, name string) int {
+	for i, database := range d.ManagedDatabases() {
+		if database.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func createTableForDatabase(path string, c config.Config, index int, reader *bufio.Reader, ui *terminalUI) error {
+	d := c.Database
+	if d == nil || index < 0 || index >= len(d.Databases) {
+		return fmt.Errorf("database is not configured")
+	}
+	table := config.DatabaseTable{Name: prompt(reader, ui, "New table name", "items")}
+	if d.Provider == "postgresql" {
+		table.Schema = prompt(reader, ui, "Schema", "public")
+	}
+	columns, err := parseDatabaseColumns(prompt(reader, ui, "Columns name:TYPE (comma-separated)", "id:BIGINT"))
+	if err != nil {
+		return err
+	}
+	table.Columns = columns
+	table.PrimaryKey = parseAliases(prompt(reader, ui, "Primary key columns (comma-separated)", ""))
+	d.Databases[index].Tables = append(d.Databases[index].Tables, table)
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Table created in " + d.Databases[index].Name)
+	return nil
+}
+
+func setDatabasePermission(path string, c config.Config, index int, reader *bufio.Reader, ui *terminalUI) error {
+	d := c.Database
+	if d == nil || index < 0 || index >= len(d.Databases) {
+		return fmt.Errorf("database is not configured")
+	}
+	users := d.ManagedUsers()
+	if len(users) == 0 {
+		return fmt.Errorf("no database users exist; create one before setting ACLs")
+	}
+	userOptions := make([]string, 0, len(users)+1)
+	for _, user := range users {
+		userOptions = append(userOptions, user.Name)
+	}
+	userOptions = append(userOptions, "0")
+	user := selectOption(reader, ui, "Existing database user", userOptions[0], userOptions...)
+	if user == "0" {
+		return nil
+	}
+	database := d.Databases[index]
+	scopeOptions := []string{"database-wide", "schema-wide"}
+	for _, table := range database.Tables {
+		scopeOptions = append(scopeOptions, "table: "+table.Name)
+	}
+	scopeOptions = append(scopeOptions, "0")
+	scope := selectOption(reader, ui, "Permission scope", scopeOptions[0], scopeOptions...)
+	if scope == "0" {
+		return nil
+	}
+	permission := config.DatabasePermission{User: user, Database: database.Name}
+	if scope == "schema-wide" {
+		if d.Provider == "postgresql" {
+			permission.Schema = prompt(reader, ui, "Schema", "public")
+		}
+	} else if strings.HasPrefix(scope, "table: ") {
+		permission.Table = strings.TrimPrefix(scope, "table: ")
+		if d.Provider == "postgresql" {
+			for _, table := range database.Tables {
+				if table.Name == permission.Table {
+					permission.Schema = defaultValue(table.Schema, "public")
+					break
+				}
+			}
+		}
+	}
+	privileges := selectOption(reader, ui, "Privileges", "SELECT", "SELECT", "SELECT,INSERT,UPDATE,DELETE", "ALL", "0")
+	if privileges == "0" {
+		return nil
+	}
+	permission.Privileges = parseAliases(privileges)
+	permission.GrantOption = yesNo(selectOption(reader, ui, "Allow this user to grant onward?", "n", "y", "n"))
+	upsertDatabasePermission(d, permission)
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Permissions updated for " + user)
+	return nil
+}
+
+func upsertDatabasePermission(d *config.Database, permission config.DatabasePermission) {
+	for i, existing := range d.Permissions {
+		if existing.User == permission.User && existing.Database == permission.Database && existing.Schema == permission.Schema && existing.Table == permission.Table {
+			d.Permissions[i] = permission
+			return
+		}
+	}
+	for i, existing := range d.ACL {
+		if existing.User == permission.User && existing.Database == permission.Database && existing.Schema == permission.Schema && existing.Table == permission.Table {
+			d.ACL[i] = permission
+			return
+		}
+	}
+	d.Permissions = append(d.Permissions, permission)
+}
+
+func countDatabasePermissions(d config.Database, database string) int {
+	count := 0
+	for _, permission := range d.ManagedPermissions() {
+		if permission.Database == database {
+			count++
+		}
+	}
+	return count
+}
+
+func showDatabaseACL(ui *terminalUI, d config.Database, database string) {
+	ui.clear()
+	ui.brand("ACL / "+database, "Current declarative permissions for this database")
+	found := false
+	for _, permission := range d.ManagedPermissions() {
+		if permission.Database != database {
+			continue
+		}
+		found = true
+		scope := "database-wide"
+		if permission.Table != "" {
+			scope = "table " + permission.Table
+		} else if permission.Schema != "" {
+			scope = "schema " + permission.Schema
+		}
+		grant := ""
+		if permission.GrantOption {
+			grant = "  grant-option"
+		}
+		fmt.Fprintf(ui, "%-20s %-24s %s%s\n", permission.User, scope, strings.Join(permission.Privileges, ", "), grant)
+	}
+	if !found {
+		ui.muted("No permissions configured for this database.")
 	}
 }
 
@@ -855,38 +1007,6 @@ func ensureDeclarativeDatabase(d *config.Database) {
 	if len(d.Users) == 0 && d.User != "" {
 		d.Users = append(d.Users, config.DatabaseUser{Name: d.User, PasswordEnv: d.PasswordEnv, Host: "localhost"})
 	}
-}
-
-func firstDatabaseName(d config.Database) string {
-	databases := d.ManagedDatabases()
-	if len(databases) > 0 {
-		return databases[0].Name
-	}
-	return "app"
-}
-
-func firstDatabaseUser(d config.Database) string {
-	users := d.ManagedUsers()
-	if len(users) > 0 {
-		return users[0].Name
-	}
-	return "app_user"
-}
-
-func chooseDatabase(d config.Database, reader *bufio.Reader, ui *terminalUI) (int, error) {
-	databases := d.ManagedDatabases()
-	if len(databases) == 0 {
-		return 0, fmt.Errorf("no databases configured")
-	}
-	for i, database := range databases {
-		fmt.Fprintf(ui, "%d  %s\n", i+1, database.Name)
-	}
-	choice := prompt(reader, ui, "Database number", "1")
-	selected, err := parseChoice(choice, len(databases))
-	if err != nil {
-		return 0, fmt.Errorf("invalid database number")
-	}
-	return selected - 1, nil
 }
 
 func parseDatabaseColumns(value string) ([]config.DatabaseColumn, error) {
@@ -911,9 +1031,9 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 		ui.brand("Guardrails & backups", "Turn on the protections that keep a live server recoverable")
 		ui.panel("CURRENT", fmt.Sprintf("https       %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s", enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured")))
 		ui.panel("ACTIONS", "1  HTTPS and certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n0  back")
-		switch prompt(reader, ui, "Select action", "1") {
+		switch selectOption(reader, ui, "Guardrails & backups", "1", "1", "2", "3", "4", "5", "0") {
 		case "1":
-			c.TLS.Enabled = yesNo(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", enabledDefault(c.TLS.Enabled)))
+			c.TLS.Enabled = yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", enabledDefault(c.TLS.Enabled), "y", "n"))
 			if c.TLS.Enabled {
 				c.TLS.Email = prompt(reader, ui, "Certificate email", defaultValue(c.TLS.Email, defaultSiteEmail(c)))
 			}
@@ -924,7 +1044,7 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 			}
 			ui.success("HTTPS settings updated")
 		case "2":
-			c.Firewall.Enabled = yesNo(prompt(reader, ui, "Enable firewall? (Y/n)", enabledDefault(c.Firewall.Enabled)))
+			c.Firewall.Enabled = yesNo(selectOption(reader, ui, "Enable firewall?", enabledDefault(c.Firewall.Enabled), "y", "n"))
 			if err := config.Write(path, c); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
@@ -932,7 +1052,7 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 			}
 			ui.success("Firewall settings updated")
 		case "3":
-			c.Backups.Enabled = yesNo(prompt(reader, ui, "Enable nightly backups? (Y/n)", enabledDefault(c.Backups.Enabled)))
+			c.Backups.Enabled = yesNo(selectOption(reader, ui, "Enable nightly backups?", enabledDefault(c.Backups.Enabled), "y", "n"))
 			if c.Backups.Enabled {
 				c.Backups.Destination = prompt(reader, ui, "Backup destination", defaultValue(c.Backups.Destination, "/var/backups/poorman"))
 				c.Backups.Schedule = prompt(reader, ui, "Backup schedule", defaultValue(c.Backups.Schedule, "0 3 * * *"))
@@ -988,7 +1108,7 @@ func adjustDatabase(c *config.Config, reader *bufio.Reader, ui *terminalUI) erro
 		currentProvider, currentRole = c.Database.Provider, c.Database.Role
 		name, user, passwordEnv = c.Database.Name, c.Database.User, c.Database.PasswordEnv
 	}
-	providerName := strings.ToLower(prompt(reader, ui, "Database (mariadb/postgresql/none)", currentProvider))
+	providerName := selectOption(reader, ui, "Database", currentProvider, "mariadb", "postgresql", "none")
 	if providerName == "none" {
 		c.Database = nil
 		return nil
@@ -1001,7 +1121,7 @@ func adjustDatabase(c *config.Config, reader *bufio.Reader, ui *terminalUI) erro
 		database = &copy
 	}
 	database.Provider = providerName
-	database.Role = strings.ToLower(prompt(reader, ui, "Database role (standalone/primary/replica)", currentRole))
+	database.Role = selectOption(reader, ui, "Database role", currentRole, "standalone", "primary", "replica")
 	database.Name = prompt(reader, ui, "Database name", name)
 	database.User = prompt(reader, ui, "Database user", user)
 	database.PasswordEnv = prompt(reader, ui, "Database password environment variable", passwordEnv)
@@ -1055,7 +1175,7 @@ func vhostsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 			}
 		}
 		ui.panel("ACTIONS", "1  add virtual host\n2  edit virtual host\n3  remove virtual host\n0  back")
-		switch prompt(reader, ui, "Select action", "1") {
+		switch selectOption(reader, ui, "Virtual hosts", "1", "1", "2", "3", "0") {
 		case "1":
 			if err := addVHost(path, c, reader, ui); err != nil {
 				ui.warn(err.Error())
@@ -1085,7 +1205,7 @@ func addVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalUI
 		Domain:  domain,
 		Root:    prompt(reader, ui, "Document root", "/var/www/"+domain),
 		Owner:   prompt(reader, ui, "System/SFTP user", firstUser(c)),
-		Runtime: prompt(reader, ui, "Runtime (static/php)", "static"),
+		Runtime: selectOption(reader, ui, "Runtime", "static", "static", "php"),
 	}
 	site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", ""))
 	c.Sites = append(c.Sites, site)
@@ -1101,11 +1221,14 @@ func editVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalU
 	if err != nil {
 		return err
 	}
+	if i < 0 {
+		return nil
+	}
 	site := c.Sites[i]
 	site.Domain = prompt(reader, ui, "Domain", site.Domain)
 	site.Root = prompt(reader, ui, "Document root", site.Root)
 	site.Owner = prompt(reader, ui, "System/SFTP user", site.Owner)
-	site.Runtime = prompt(reader, ui, "Runtime (static/php)", defaultValue(site.Runtime, "static"))
+	site.Runtime = selectOption(reader, ui, "Runtime", defaultValue(site.Runtime, "static"), "static", "php")
 	site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", strings.Join(site.Aliases, ",")))
 	c.Sites[i] = site
 	if err := config.Write(path, c); err != nil {
@@ -1120,8 +1243,11 @@ func removeVHost(path string, c config.Config, reader *bufio.Reader, ui *termina
 	if err != nil {
 		return err
 	}
+	if i < 0 {
+		return nil
+	}
 	site := c.Sites[i]
-	if !yesNo(prompt(reader, ui, "Remove "+site.Domain+"? (y/N)", "n")) {
+	if !yesNo(selectOption(reader, ui, "Remove "+site.Domain+"?", "n", "y", "n")) {
 		ui.muted("Cancelled.")
 		return nil
 	}
@@ -1137,12 +1263,21 @@ func chooseVHost(c config.Config, reader *bufio.Reader, ui *terminalUI) (int, er
 	if len(c.Sites) == 0 {
 		return 0, fmt.Errorf("no virtual hosts configured")
 	}
-	choice := prompt(reader, ui, "Virtual host number", "1")
-	n, err := parseChoice(choice, len(c.Sites))
-	if err != nil {
-		return 0, fmt.Errorf("invalid virtual host number")
+	options := make([]string, 0, len(c.Sites))
+	for i, site := range c.Sites {
+		options = append(options, fmt.Sprintf("%d  %s", i+1, site.Domain))
 	}
-	return n - 1, nil
+	options = append(options, "0")
+	choice := selectOption(reader, ui, "Virtual host", options[0], options...)
+	if choice == "0" {
+		return -1, nil
+	}
+	for i, option := range options {
+		if choice == option {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid virtual host selection")
 }
 
 func firstUser(c config.Config) string {
@@ -1181,7 +1316,7 @@ func operationsTUI(ctx context.Context, c config.Config, path string, reader *bu
 			backupAction += " (disabled)"
 		}
 		ui.panel("ACTIONS", "1  host resource stats\n2  recent service logs\n3  "+backupAction+"\n0  back")
-		switch prompt(reader, ui, "Select action", "1") {
+		switch selectOption(reader, ui, "Long-term operations", "1", "1", "2", "3", "0") {
 		case "1":
 			ui.clear()
 			ui.brand("Host resource stats", "A point-in-time view of capacity and service failures")
@@ -1196,19 +1331,17 @@ func operationsTUI(ctx context.Context, c config.Config, path string, reader *bu
 				fmt.Fprintf(ui, "%d  %s\n", i+1, service)
 			}
 			fmt.Fprintln(ui, "s  system boot log\n0  back")
-			choice := prompt(reader, ui, "Service", "1")
+			serviceOptions := append([]string(nil), services...)
+			serviceOptions = append(serviceOptions, "system", "0")
+			choice := selectOption(reader, ui, "Service", services[0], serviceOptions...)
 			if choice == "0" {
 				continue
 			}
 			service := ""
-			if choice == "s" || choice == "S" {
+			if choice == "system" {
 				service = "system"
-			} else if n, err := parseChoice(choice, len(services)); err == nil {
-				service = services[n-1]
 			} else {
-				ui.warn("Unknown service.")
-				pause(reader, ui)
-				continue
+				service = choice
 			}
 			lineCount := prompt(reader, ui, "Lines", "50")
 			lines := 50
@@ -1322,7 +1455,7 @@ func parsePositive(value string) (int, error) {
 }
 
 func pause(reader *bufio.Reader, ui *terminalUI) {
-	prompt(reader, ui, "Press enter to continue", "")
+	selectOption(reader, ui, "Press enter to continue", "0", "0")
 }
 
 func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI) error {
@@ -1344,7 +1477,7 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 			policySuffix = " (disabled)"
 		}
 		ui.panel("ACTIONS", "1  show firewall status\n2  preview configured policy"+policySuffix+"\n3  apply configured policy"+policySuffix+"\n4  disable firewall\n0  back")
-		switch prompt(reader, ui, "Select action", "1") {
+		switch selectOption(reader, ui, "Firewall management", "1", "1", "2", "3", "4", "0") {
 		case "1":
 			operation, err := provider.FirewallStatus(p)
 			if err != nil {
@@ -1374,14 +1507,12 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 				return err
 			}
 			operation.Print(ui)
-			fmt.Fprint(ui, "Apply firewall policy? [y/N] ")
-			answer, _ := reader.ReadString('\n')
-			if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+			if yesNo(selectOption(reader, ui, "Apply firewall policy?", "n", "y", "n")) {
+				if err := executor.Apply(ctx, operation, reader, ui, ui); err != nil {
+					return err
+				}
+			} else {
 				ui.muted("Cancelled.")
-				break
-			}
-			if err := executor.Apply(ctx, operation, reader, ui, ui); err != nil {
-				return err
 			}
 		case "4":
 			operation, err := provider.DisableFirewall(p)
@@ -1410,7 +1541,8 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 // one place for its visual language and can gracefully fall back to plain text.
 type terminalUI struct {
 	io.Writer
-	ansi bool
+	ansi  bool
+	input *os.File
 }
 
 const (
@@ -1427,6 +1559,12 @@ func newTerminalUI(w io.Writer) *terminalUI {
 		}
 	}
 	return &terminalUI{Writer: w, ansi: ansi}
+}
+
+func attachTerminalInput(ui *terminalUI, in io.Reader) {
+	if file, ok := in.(*os.File); ok && isTerminal(file) {
+		ui.input = file
+	}
 }
 
 func (ui *terminalUI) paint(code, value string) string {
@@ -1539,13 +1677,22 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 	if !c.Backups.Enabled {
 		backupAction += " (disabled)"
 	}
-	ui.panel("ACTIONS", dashboardActionLine(1, 5, selected, "preview plan", replicationAction)+"\n"+
-		dashboardActionLine(2, 6, selected, "apply configuration", "Firewall management")+"\n"+
-		dashboardActionLine(3, 7, selected, "health status", "long-term operations")+"\n"+
-		dashboardActionLine(4, 8, selected, backupAction, "Virtual hosts")+"\n"+
-		dashboardActionLine(9, 10, selected, "Stack settings", "guided replica setup")+"\n"+
-		dashboardActionLine(11, 12, selected, "guardrails & backups", "Database management")+"\n"+
-		dashboardActionLine(0, -1, selected, "exit", ""))
+	actions := []string{
+		dashboardActionLine(1, -1, selected, "preview plan", ""),
+		dashboardActionLine(2, -1, selected, "apply configuration", ""),
+		dashboardActionLine(3, -1, selected, "health status", ""),
+		dashboardActionLine(4, -1, selected, backupAction, ""),
+		dashboardActionLine(5, -1, selected, replicationAction, ""),
+		dashboardActionLine(6, -1, selected, "Firewall management", ""),
+		dashboardActionLine(7, -1, selected, "long-term operations", ""),
+		dashboardActionLine(8, -1, selected, "Virtual hosts", ""),
+		dashboardActionLine(9, -1, selected, "Stack settings", ""),
+		dashboardActionLine(10, -1, selected, "guided replica setup", ""),
+		dashboardActionLine(11, -1, selected, "guardrails & backups", ""),
+		dashboardActionLine(12, -1, selected, "Database management", ""),
+		dashboardActionLine(0, -1, selected, "exit", ""),
+	}
+	ui.panel("ACTIONS", strings.Join(actions, "\n"))
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
 }
 
@@ -1567,7 +1714,7 @@ func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c confi
 	file, ok := in.(*os.File)
 	if !ok || !isTerminal(file) {
 		ui.dashboard(c, path)
-		return prompt(reader, ui, "Select action", "1")
+		return selectOption(reader, ui, "Select action", "1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "0")
 	}
 
 	return rawDashboardChoice(file, ui, c, path)
@@ -1590,7 +1737,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 		restore.Stdin = file
 		_ = restore.Run()
 	}()
-	raw := exec.Command("stty", "-icanon", "-echo", "min", "1", "time", "0")
+	raw := exec.Command("stty", "-icanon", "-echo", "min", "0", "time", "1")
 	raw.Stdin = file
 	if err := raw.Run(); err != nil {
 		return "1"
@@ -1601,11 +1748,11 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	ui.clear()
 	ui.dashboardSelected(c, path, selected)
 	for {
-		var b [1]byte
-		if _, err := file.Read(b[:]); err != nil {
+		b, ok := readRawByte(file)
+		if !ok {
 			return "1"
 		}
-		switch b[0] {
+		switch b {
 		case '\r', '\n':
 			if typed != "" {
 				return typed
@@ -1614,11 +1761,18 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 		case 'q', 'Q':
 			return "q"
 		case 0x1b:
-			var sequence [2]byte
-			if _, err := io.ReadFull(file, sequence[:]); err != nil {
-				continue
+			prefix, ok := readRawMaybeByte(file)
+			if !ok {
+				return "0"
 			}
-			switch sequence[1] {
+			if prefix != '[' {
+				return "0"
+			}
+			code, ok := readRawMaybeByte(file)
+			if !ok {
+				return "0"
+			}
+			switch code {
 			case 'A':
 				selected--
 				if selected < 0 {
@@ -1635,7 +1789,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 			ui.clear()
 			ui.dashboardSelected(c, path, selected)
 		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-			typed += string(b[:])
+			typed += string(b)
 		case 8, 127:
 			if len(typed) > 0 {
 				typed = typed[:len(typed)-1]
@@ -1672,6 +1826,162 @@ func prompt(reader *bufio.Reader, out io.Writer, label, fallback string) string 
 		return fallback
 	}
 	return answer
+}
+
+// selectOption is the finite-choice counterpart to prompt. Interactive TUI
+// sessions get a real arrow-key selector; pipes, tests, and scripted setup
+// retain a deterministic numbered/value input mode.
+func selectOption(reader *bufio.Reader, ui *terminalUI, label, fallback string, options ...string) string {
+	if len(options) == 0 {
+		return prompt(reader, ui, label, fallback)
+	}
+	if ui.input != nil && isTerminal(ui.input) && reader.Buffered() == 0 {
+		if value, ok := rawSelectOption(ui, label, fallback, options); ok {
+			return value
+		}
+	}
+	fmt.Fprintf(ui, "%s [%s]\n", label, fallback)
+	for i, option := range options {
+		fmt.Fprintf(ui, "  %d  %s\n", i+1, option)
+	}
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return fallback
+	}
+	return selectedOptionValue(answer, fallback, options)
+}
+
+func selectedOptionValue(answer, fallback string, options []string) string {
+	for i, option := range options {
+		if answer == strconv.Itoa(i+1) || strings.EqualFold(answer, option) {
+			return option
+		}
+	}
+	lower := strings.ToLower(answer)
+	for _, option := range options {
+		if (lower == "yes" && strings.EqualFold(option, "y")) || (lower == "no" && strings.EqualFold(option, "n")) {
+			return option
+		}
+	}
+	return fallback
+}
+
+func rawSelectOption(ui *terminalUI, label, fallback string, options []string) (string, bool) {
+	file := ui.input
+	getState := exec.Command("stty", "-g")
+	getState.Stdin = file
+	state, err := getState.Output()
+	if err != nil {
+		return "", false
+	}
+	defer func() {
+		restore := exec.Command("stty", strings.TrimSpace(string(state)))
+		restore.Stdin = file
+		_ = restore.Run()
+	}()
+	raw := exec.Command("stty", "-icanon", "-echo", "min", "0", "time", "1")
+	raw.Stdin = file
+	if err := raw.Run(); err != nil {
+		return "", false
+	}
+
+	selected := 0
+	for i, option := range options {
+		if strings.EqualFold(option, fallback) {
+			selected = i
+			break
+		}
+	}
+	render := func() {
+		fmt.Fprint(ui, "\033[2J\033[H")
+		fmt.Fprintln(ui, ui.paint("38;5;45;1", label))
+		for i, option := range options {
+			marker := "  "
+			if i == selected {
+				marker = "> "
+			}
+			fmt.Fprintf(ui, "%s%d  %s\n", marker, i+1, option)
+		}
+		fmt.Fprintln(ui, ui.paint("38;5;244", "Use ↑/↓ and Enter"))
+	}
+	render()
+	for {
+		b, ok := readRawByte(file)
+		if !ok {
+			return "", false
+		}
+		switch b {
+		case '\r', '\n':
+			fmt.Fprintf(ui, "Selected: %s\n", options[selected])
+			return options[selected], true
+		case 'q', 'Q':
+			return escapeOption(fallback, options), true
+		case 'k':
+			selected--
+			if selected < 0 {
+				selected = len(options) - 1
+			}
+			render()
+		case 'j':
+			selected = (selected + 1) % len(options)
+			render()
+		case 0x1b:
+			prefix, ok := readRawMaybeByte(file)
+			if !ok {
+				return escapeOption(fallback, options), true
+			}
+			if prefix != '[' {
+				return escapeOption(fallback, options), true
+			}
+			code, ok := readRawMaybeByte(file)
+			if !ok {
+				return escapeOption(fallback, options), true
+			}
+			switch code {
+			case 'A':
+				selected--
+				if selected < 0 {
+					selected = len(options) - 1
+				}
+				render()
+			case 'B':
+				selected = (selected + 1) % len(options)
+				render()
+			}
+		}
+	}
+}
+
+func readRawByte(file *os.File) (byte, bool) {
+	for {
+		var b [1]byte
+		n, err := file.Read(b[:])
+		if n == 1 {
+			return b[0], true
+		}
+		if err != nil {
+			return 0, false
+		}
+	}
+}
+
+func readRawMaybeByte(file *os.File) (byte, bool) {
+	var b [1]byte
+	n, err := file.Read(b[:])
+	if n == 1 {
+		return b[0], true
+	}
+	return 0, err == nil && n > 0
+}
+
+func escapeOption(fallback string, options []string) string {
+	for _, option := range options {
+		if option == "0" {
+			return option
+		}
+	}
+	return fallback
 }
 
 func initCommand(args []string, out io.Writer) error {

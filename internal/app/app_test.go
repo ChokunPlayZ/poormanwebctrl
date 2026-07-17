@@ -175,6 +175,44 @@ func TestTUICreatesDatabaseChainObject(t *testing.T) {
 	}
 }
 
+func TestTUIDatabaseManagerCreatesTableForSelectedDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-table.json")
+	if err := config.WriteDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n1\nitems\nid:BIGINT\nid\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database == nil || len(c.Database.Databases) != 1 || len(c.Database.Databases[0].Tables) != 1 || c.Database.Databases[0].Tables[0].Name != "items" {
+		t.Fatalf("database tables = %#v, want items on selected database", c.Database)
+	}
+}
+
+func TestTUIDatabaseManagerSetsACLForExistingUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-acl.json")
+	if err := config.WriteDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n2\n1\n1\n1\nn\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database == nil || len(c.Database.Permissions) != 1 || c.Database.Permissions[0].User != "example" || c.Database.Permissions[0].Database != "example" {
+		t.Fatalf("database permissions = %#v, want example on example", c.Database)
+	}
+}
+
 func TestTUIConfiguresPostgresReplica(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replica.json")
 	in := bytes.NewBufferString("1\nreplica.example.com\n\n\nphp\npostgresql\nreplica\n")
