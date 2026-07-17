@@ -1712,12 +1712,18 @@ func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string
 
 func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
 	file, ok := in.(*os.File)
-	if !ok || !isTerminal(file) {
+	if !ok || !isTerminal(file) || !rawTerminalAvailable(file) {
 		ui.dashboard(c, path)
 		return selectOption(reader, ui, "Select action", "1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "0")
 	}
 
 	return rawDashboardChoice(file, ui, c, path)
+}
+
+func rawTerminalAvailable(file *os.File) bool {
+	check := exec.Command("stty", "-g")
+	check.Stdin = file
+	return check.Run() == nil
 }
 
 func isTerminal(file *os.File) bool {
@@ -1730,7 +1736,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	getState.Stdin = file
 	state, err := getState.Output()
 	if err != nil {
-		return "1"
+		return "0"
 	}
 	defer func() {
 		restore := exec.Command("stty", strings.TrimSpace(string(state)))
@@ -1740,7 +1746,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	raw := exec.Command("stty", "-icanon", "-echo", "min", "0", "time", "1")
 	raw.Stdin = file
 	if err := raw.Run(); err != nil {
-		return "1"
+		return "0"
 	}
 
 	selected := 1
@@ -1750,7 +1756,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	for {
 		b, ok := readRawByte(file)
 		if !ok {
-			return "1"
+			return "0"
 		}
 		switch b {
 		case '\r', '\n':
