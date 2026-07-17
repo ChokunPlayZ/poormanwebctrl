@@ -76,6 +76,61 @@ func TestAcceptsIndependentSameMachineMariaDBReplica(t *testing.T) {
 	}
 }
 
+func TestDatabaseChainValidation(t *testing.T) {
+	c := Default()
+	c.Database = &Database{
+		Provider: "postgresql",
+		Role:     "primary",
+		Users: []DatabaseUser{
+			{Name: "app_owner", PasswordEnv: "APP_OWNER_PASSWORD"},
+			{Name: "app_reader", PasswordEnv: "APP_READER_PASSWORD"},
+		},
+		Databases: []DatabaseSpec{{
+			Name: "app", Owner: "app_owner",
+			Tables: []DatabaseTable{{
+				Name:       "items",
+				Columns:    []DatabaseColumn{{Name: "id", Type: "BIGINT"}, {Name: "label", Type: "VARCHAR(255)"}},
+				PrimaryKey: []string{"id"},
+			}},
+		}},
+		Permissions: []DatabasePermission{{User: "app_reader", Database: "app", Schema: "public", Table: "items", Privileges: []string{"SELECT"}}},
+		Replication: Replication{User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "10.0.0.0/24"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDatabaseChainRejectsUnknownPermissionTarget(t *testing.T) {
+	c := Default()
+	c.Database = &Database{
+		Provider:    "mariadb",
+		Databases:   []DatabaseSpec{{Name: "app"}},
+		Users:       []DatabaseUser{{Name: "reader", PasswordEnv: "READER_PASSWORD"}},
+		Permissions: []DatabasePermission{{User: "missing", Database: "app", Privileges: []string{"SELECT"}}},
+	}
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected unknown permission user validation error")
+	}
+}
+
+func TestWordPressUsesDeclarativeApplicationCredentials(t *testing.T) {
+	c := Default()
+	c.Database = &Database{
+		Provider:  "mariadb",
+		Users:     []DatabaseUser{{Name: "wp_app", PasswordEnv: "WP_APP_PASSWORD"}},
+		Databases: []DatabaseSpec{{Name: "wordpress", Owner: "wp_app"}},
+	}
+	c.Sites[0].WordPress = &WordPress{AdminEmail: "admin@example.com", AdminPassEnv: "WP_ADMIN_PASSWORD"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	name, user, passwordEnv := c.Database.ApplicationCredentials()
+	if name != "wordpress" || user != "wp_app" || passwordEnv != "WP_APP_PASSWORD" {
+		t.Fatalf("application credentials = %q/%q/%q", name, user, passwordEnv)
+	}
+}
+
 func TestSameMachineMariaDBReplicaRequiresSeparateDataDir(t *testing.T) {
 	c := Default()
 	c.Database = &Database{Provider: "mariadb", Role: "replica", Port: 3307, Replication: Replication{PrimaryHost: "127.0.0.1", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2}}

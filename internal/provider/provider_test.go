@@ -43,6 +43,60 @@ func TestPlanDoesNotPrintSecretTemplates(t *testing.T) {
 	}
 }
 
+func TestDatabaseChainPlanCreatesObjectsAndGrants(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "postgresql",
+		Role:     "primary",
+		Users: []config.DatabaseUser{
+			{Name: "owner", PasswordEnv: "OWNER_PASSWORD"},
+			{Name: "reader", PasswordEnv: "READER_PASSWORD"},
+		},
+		Databases: []config.DatabaseSpec{{
+			Name: "catalog", Owner: "owner",
+			Tables: []config.DatabaseTable{{Name: "products", Schema: "public", Columns: []config.DatabaseColumn{{Name: "id", Type: "BIGINT"}}, PrimaryKey: []string{"id"}}},
+		}},
+		Permissions: []config.DatabasePermission{{User: "reader", Database: "catalog", Schema: "public", Table: "products", Privileges: []string{"SELECT"}}},
+		Replication: config.Replication{User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", AllowedCIDR: "10.0.0.0/24"},
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptions := ""
+	for _, step := range p.Steps {
+		descriptions += step.Description + "\n"
+	}
+	for _, want := range []string{"Create PostgreSQL database users", "Create PostgreSQL database catalog", "Create PostgreSQL table public.products", "Grant PostgreSQL permissions to reader"} {
+		if !strings.Contains(descriptions, want) {
+			t.Errorf("database chain plan missing %q", want)
+		}
+	}
+}
+
+func TestReplicaPlanSkipsDatabaseChainWrites(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider:    "postgresql",
+		Role:        "replica",
+		Port:        5433,
+		DataDir:     "/var/lib/postgresql/replica",
+		Users:       []config.DatabaseUser{{Name: "reader", PasswordEnv: "READER_PASSWORD"}},
+		Databases:   []config.DatabaseSpec{{Name: "catalog", Tables: []config.DatabaseTable{{Name: "products", Columns: []config.DatabaseColumn{{Name: "id", Type: "BIGINT"}}}}}},
+		Permissions: []config.DatabasePermission{{User: "reader", Database: "catalog", Privileges: []string{"SELECT"}}},
+		Replication: config.Replication{PrimaryHost: "10.0.0.10", PrimaryPort: 5432, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", Slot: "catalog_replica"},
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range p.Steps {
+		if strings.Contains(step.Description, "database user") || strings.Contains(step.Description, "database catalog") || strings.Contains(step.Description, "table") || strings.Contains(step.Description, "permissions") {
+			t.Fatalf("replica plan contains write-side database step %q", step.Description)
+		}
+	}
+}
+
 func TestWordPressPlanHasCompleteWorkflow(t *testing.T) {
 	c := config.Default()
 	c.Sites[0].WordPress = &config.WordPress{AdminEmail: "admin@example.com", AdminPassEnv: "WP_ADMIN_PASSWORD"}

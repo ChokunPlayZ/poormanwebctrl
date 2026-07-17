@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 	"github.com/chokunplayz/poormanwebctrl/internal/managed"
@@ -89,6 +91,52 @@ func TestTUIShowsOperationsForExistingConfig(t *testing.T) {
 	}
 }
 
+func TestUIPanelsKeepTheirRightBorderAligned(t *testing.T) {
+	var out bytes.Buffer
+	newTerminalUI(&out).panel("TEST", "short\nthis line is deliberately longer than the default panel width so the panel must grow as one unit")
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("panel lines = %d, want 4", len(lines))
+	}
+	want := utf8.RuneCountInString(lines[0])
+	for i, line := range lines {
+		if got := utf8.RuneCountInString(line); got != want {
+			t.Fatalf("panel line %d width = %d, want %d:\n%s", i, got, want, out.String())
+		}
+	}
+}
+
+func TestDashboardActionColumnsStayAligned(t *testing.T) {
+	first := dashboardActionLine(1, 5, 0, "preview plan", "replication status")
+	second := dashboardActionLine(2, 6, 0, "apply configuration", "Firewall management")
+	if got, want := strings.Index(first, "  5"), strings.Index(second, "  6"); got != want {
+		t.Fatalf("right-column starts = %d and %d, want equal", got, want)
+	}
+}
+
+func TestTUIEnablesBackupsFromGuardrailsMenu(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	c := config.Default()
+	c.Backups.Enabled = false
+	c.Backups.Destination = ""
+	c.Backups.Schedule = ""
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("11\n3\ny\n\n\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Backups.Enabled || got.Backups.Destination != "/var/backups/poorman" || got.Backups.Schedule != "0 3 * * *" {
+		t.Fatalf("backups = %#v, want enabled defaults", got.Backups)
+	}
+}
+
 func TestTUIManagesMultipleVirtualHosts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server.json")
 	if err := config.WriteDefault(path); err != nil {
@@ -105,6 +153,25 @@ func TestTUIManagesMultipleVirtualHosts(t *testing.T) {
 	}
 	if len(c.Sites) != 2 || c.Sites[1].Domain != "shop.example.com" {
 		t.Fatalf("sites = %#v, want second host shop.example.com", c.Sites)
+	}
+}
+
+func TestTUICreatesDatabaseChainObject(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.json")
+	if err := config.WriteDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n1\nanalytics\n\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database == nil || len(c.Database.Databases) != 2 || c.Database.Databases[1].Name != "analytics" {
+		t.Fatalf("databases = %#v, want legacy database plus analytics", c.Database)
 	}
 }
 

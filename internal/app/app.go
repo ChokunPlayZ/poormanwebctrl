@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 	"github.com/chokunplayz/poormanwebctrl/internal/executor"
@@ -628,6 +629,16 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 				ui.warn("Replica setup unavailable: " + err.Error())
 				pause(reader, ui)
 			}
+		case "11":
+			if err := protectionTUI(ctx, path, reader, ui); err != nil {
+				ui.warn("Protection settings unavailable: " + err.Error())
+				pause(reader, ui)
+			}
+		case "12":
+			if err := databaseManagementTUI(path, reader, ui); err != nil {
+				ui.warn("Database management unavailable: " + err.Error())
+				pause(reader, ui)
+			}
 		case "0", "q", "Q":
 			return nil
 		default:
@@ -714,6 +725,260 @@ func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		}
 		ui.success("Stack settings updated")
 	}
+}
+
+func databaseManagementTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		if c.Database == nil {
+			return fmt.Errorf("database is not configured")
+		}
+		d := c.Database
+		ui.clear()
+		ui.brand("Database management", "Declare databases, users, tables, and least-privilege grants")
+		if d.Role == "replica" {
+			ui.panel("REPLICA", "This database is read-only. Schema, users, and grants are sourced from the primary through replication.")
+		}
+		databases := d.ManagedDatabases()
+		users := d.ManagedUsers()
+		tables := 0
+		for _, database := range databases {
+			tables += len(database.Tables)
+		}
+		ui.panel("CURRENT", fmt.Sprintf("provider   %s (%s)\ndatabases  %d\nusers      %d\ntables     %d\ngrants     %d", d.Provider, defaultValue(d.Role, "standalone"), len(databases), len(users), tables, len(d.ManagedPermissions())))
+		ui.panel("ACTIONS", "1  add database\n2  add database user\n3  add table\n4  add permission / ACL\n0  back")
+		switch prompt(reader, ui, "Select action", "1") {
+		case "1":
+			if d.Role == "replica" {
+				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
+				pause(reader, ui)
+				continue
+			}
+			ensureDeclarativeDatabase(d)
+			name := prompt(reader, ui, "Database name", "app")
+			owner := prompt(reader, ui, "Database owner/user", firstDatabaseUser(*d))
+			d.Databases = append(d.Databases, config.DatabaseSpec{Name: name, Owner: owner})
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Database added")
+		case "2":
+			if d.Role == "replica" {
+				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
+				pause(reader, ui)
+				continue
+			}
+			ensureDeclarativeDatabase(d)
+			name := prompt(reader, ui, "Database user", "app_user")
+			passwordEnv := prompt(reader, ui, "Password environment variable", "POORMAN_DB_PASSWORD")
+			host := ""
+			if d.Provider == "mariadb" {
+				host = prompt(reader, ui, "MariaDB host (localhost/%/IP)", "localhost")
+			}
+			d.Users = append(d.Users, config.DatabaseUser{Name: name, PasswordEnv: passwordEnv, Host: host})
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Database user added")
+		case "3":
+			if d.Role == "replica" {
+				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
+				pause(reader, ui)
+				continue
+			}
+			ensureDeclarativeDatabase(d)
+			databaseIndex, err := chooseDatabase(*d, reader, ui)
+			if err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			table := config.DatabaseTable{Name: prompt(reader, ui, "Table name", "items")}
+			if d.Provider == "postgresql" {
+				table.Schema = prompt(reader, ui, "Schema", "public")
+			}
+			columns, err := parseDatabaseColumns(prompt(reader, ui, "Columns name:TYPE (comma-separated)", "id:BIGINT"))
+			if err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			table.Columns = columns
+			table.PrimaryKey = parseAliases(prompt(reader, ui, "Primary key columns (comma-separated)", ""))
+			d.Databases[databaseIndex].Tables = append(d.Databases[databaseIndex].Tables, table)
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Table added")
+		case "4":
+			if d.Role == "replica" {
+				ui.warn("Edit the primary configuration; replicas do not accept database writes.")
+				pause(reader, ui)
+				continue
+			}
+			ensureDeclarativeDatabase(d)
+			user := prompt(reader, ui, "Database user", firstDatabaseUser(*d))
+			database := prompt(reader, ui, "Database", firstDatabaseName(*d))
+			permission := config.DatabasePermission{User: user, Database: database}
+			permission.Schema = prompt(reader, ui, "Schema (blank for database-wide)", "")
+			permission.Table = prompt(reader, ui, "Table (blank for schema/database-wide)", "")
+			permission.Privileges = parseAliases(prompt(reader, ui, "Privileges (comma-separated)", "SELECT"))
+			permission.GrantOption = yesNo(prompt(reader, ui, "Allow this user to grant onward? (y/N)", "n"))
+			d.Permissions = append(d.Permissions, permission)
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Permission added")
+		case "0", "q", "Q":
+			return nil
+		default:
+			ui.warn("Unknown selection.")
+		}
+	}
+}
+
+func ensureDeclarativeDatabase(d *config.Database) {
+	if len(d.Databases) == 0 && d.Name != "" {
+		d.Databases = append(d.Databases, config.DatabaseSpec{Name: d.Name, Owner: d.User})
+	}
+	if len(d.Users) == 0 && d.User != "" {
+		d.Users = append(d.Users, config.DatabaseUser{Name: d.User, PasswordEnv: d.PasswordEnv, Host: "localhost"})
+	}
+}
+
+func firstDatabaseName(d config.Database) string {
+	databases := d.ManagedDatabases()
+	if len(databases) > 0 {
+		return databases[0].Name
+	}
+	return "app"
+}
+
+func firstDatabaseUser(d config.Database) string {
+	users := d.ManagedUsers()
+	if len(users) > 0 {
+		return users[0].Name
+	}
+	return "app_user"
+}
+
+func chooseDatabase(d config.Database, reader *bufio.Reader, ui *terminalUI) (int, error) {
+	databases := d.ManagedDatabases()
+	if len(databases) == 0 {
+		return 0, fmt.Errorf("no databases configured")
+	}
+	for i, database := range databases {
+		fmt.Fprintf(ui, "%d  %s\n", i+1, database.Name)
+	}
+	choice := prompt(reader, ui, "Database number", "1")
+	selected, err := parseChoice(choice, len(databases))
+	if err != nil {
+		return 0, fmt.Errorf("invalid database number")
+	}
+	return selected - 1, nil
+}
+
+func parseDatabaseColumns(value string) ([]config.DatabaseColumn, error) {
+	var columns []config.DatabaseColumn
+	for _, item := range strings.Split(value, ",") {
+		parts := strings.SplitN(strings.TrimSpace(item), ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("columns must use name:TYPE format")
+		}
+		columns = append(columns, config.DatabaseColumn{Name: strings.TrimSpace(parts[0]), Type: strings.TrimSpace(parts[1])})
+	}
+	return columns, nil
+}
+
+func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		ui.clear()
+		ui.brand("Guardrails & backups", "Turn on the protections that keep a live server recoverable")
+		ui.panel("CURRENT", fmt.Sprintf("https       %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s", enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured")))
+		ui.panel("ACTIONS", "1  HTTPS and certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n0  back")
+		switch prompt(reader, ui, "Select action", "1") {
+		case "1":
+			c.TLS.Enabled = yesNo(prompt(reader, ui, "Enable HTTPS with Let's Encrypt? (Y/n)", enabledDefault(c.TLS.Enabled)))
+			if c.TLS.Enabled {
+				c.TLS.Email = prompt(reader, ui, "Certificate email", defaultValue(c.TLS.Email, defaultSiteEmail(c)))
+			}
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("HTTPS settings updated")
+		case "2":
+			c.Firewall.Enabled = yesNo(prompt(reader, ui, "Enable firewall? (Y/n)", enabledDefault(c.Firewall.Enabled)))
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Firewall settings updated")
+		case "3":
+			c.Backups.Enabled = yesNo(prompt(reader, ui, "Enable nightly backups? (Y/n)", enabledDefault(c.Backups.Enabled)))
+			if c.Backups.Enabled {
+				c.Backups.Destination = prompt(reader, ui, "Backup destination", defaultValue(c.Backups.Destination, "/var/backups/poorman"))
+				c.Backups.Schedule = prompt(reader, ui, "Backup schedule", defaultValue(c.Backups.Schedule, "0 3 * * *"))
+			}
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Backup settings updated")
+		case "4":
+			if !c.Backups.Enabled {
+				ui.warn("Backups are disabled. Enable them in this menu first.")
+				pause(reader, ui)
+				continue
+			}
+			if err := backupCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
+				ui.warn("Backup failed: " + err.Error())
+			}
+			pause(reader, ui)
+		case "5":
+			ui.clear()
+			ui.brand("Backup inventory", "Review artifacts produced by the configured backup job")
+			if !c.Backups.Enabled {
+				ui.warn("Backups are disabled. Enable them in this menu first.")
+				pause(reader, ui)
+				continue
+			}
+			ui.muted("Destination: " + c.Backups.Destination)
+			if err := ops.BackupFiles(ctx, c.Backups.Destination, ui); err != nil {
+				ui.warn(err.Error())
+			}
+			pause(reader, ui)
+		case "0", "q", "Q":
+			return nil
+		default:
+			ui.warn("Unknown selection.")
+		}
+	}
+}
+
+func defaultSiteEmail(c config.Config) string {
+	if len(c.Sites) > 0 && strings.Contains(c.Sites[0].Domain, ".") {
+		return "admin@" + c.Sites[0].Domain
+	}
+	return "admin@example.com"
 }
 
 func adjustDatabase(c *config.Config, reader *bufio.Reader, ui *terminalUI) error {
@@ -1148,6 +1413,12 @@ type terminalUI struct {
 	ansi bool
 }
 
+const (
+	panelInnerWidth       = 70
+	dashboardLabelWidth   = 26
+	maxDashboardSelection = 12
+)
+
 func newTerminalUI(w io.Writer) *terminalUI {
 	ansi := false
 	if f, ok := w.(*os.File); ok {
@@ -1184,11 +1455,51 @@ func (ui *terminalUI) brand(section, subtitle string) {
 }
 
 func (ui *terminalUI) panel(title, body string) {
-	fmt.Fprintln(ui, ui.paint("38;5;238", "╭─ ")+ui.paint("38;5;45;1", title)+ui.paint("38;5;238", " "+strings.Repeat("─", 65-len(title))+"╮"))
-	for _, line := range strings.Split(body, "\n") {
-		fmt.Fprintf(ui, "%s %s %s\n", ui.paint("38;5;238", "│"), line, ui.paint("38;5;238", "│"))
+	lines := strings.Split(body, "\n")
+	innerWidth := panelInnerWidth
+	for _, line := range lines {
+		if width := displayWidth(line); width > innerWidth {
+			innerWidth = width
+		}
 	}
-	fmt.Fprintln(ui, ui.paint("38;5;238", "╰"+strings.Repeat("─", 72)+"╯"))
+	lineWidth := innerWidth - displayWidth(title) - 1
+	if lineWidth < 0 {
+		lineWidth = 0
+	}
+	fmt.Fprintln(ui, ui.paint("38;5;238", "╭─ ")+ui.paint("38;5;45;1", title)+ui.paint("38;5;238", " "+strings.Repeat("─", lineWidth)+"╮"))
+	for _, line := range lines {
+		fmt.Fprintf(ui, "%s %s %s\n", ui.paint("38;5;238", "│"), padPanelLine(line, innerWidth), ui.paint("38;5;238", "│"))
+	}
+	fmt.Fprintln(ui, ui.paint("38;5;238", "╰"+strings.Repeat("─", innerWidth+2)+"╯"))
+}
+
+func displayWidth(value string) int {
+	return utf8.RuneCountInString(stripANSI(value))
+}
+
+func stripANSI(value string) string {
+	var clean strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] == 0x1b && i+1 < len(value) && value[i+1] == '[' {
+			i += 2
+			for i < len(value) {
+				b := value[i]
+				i++
+				if b >= '@' && b <= '~' {
+					break
+				}
+			}
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(value[i:])
+		clean.WriteString(value[i : i+size])
+		i += size
+	}
+	return clean.String()
+}
+
+func padPanelLine(value string, width int) string {
+	return value + strings.Repeat(" ", width-displayWidth(value))
 }
 
 func (ui *terminalUI) dashboard(c config.Config, path string) {
@@ -1232,7 +1543,9 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 		dashboardActionLine(2, 6, selected, "apply configuration", "Firewall management")+"\n"+
 		dashboardActionLine(3, 7, selected, "health status", "long-term operations")+"\n"+
 		dashboardActionLine(4, 8, selected, backupAction, "Virtual hosts")+"\n"+
-		dashboardActionLine(9, 10, selected, "Stack settings", "guided replica setup")+"\n"+dashboardActionLine(0, -1, selected, "exit", ""))
+		dashboardActionLine(9, 10, selected, "Stack settings", "guided replica setup")+"\n"+
+		dashboardActionLine(11, 12, selected, "guardrails & backups", "Database management")+"\n"+
+		dashboardActionLine(0, -1, selected, "exit", ""))
 	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
 }
 
@@ -1247,7 +1560,7 @@ func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string
 	if right < 0 {
 		return fmt.Sprintf("%s%-2d  %s", leftMarker, left, leftLabel)
 	}
-	return fmt.Sprintf("%s%-2d  %-22s%s%-2d  %s", leftMarker, left, leftLabel, rightMarker, right, rightLabel)
+	return fmt.Sprintf("%s%-2d  %-*s%s%-2d  %s", leftMarker, left, dashboardLabelWidth, leftLabel, rightMarker, right, rightLabel)
 }
 
 func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
@@ -1309,11 +1622,11 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 			case 'A':
 				selected--
 				if selected < 0 {
-					selected = 10
+					selected = maxDashboardSelection
 				}
 			case 'B':
 				selected++
-				if selected > 10 {
+				if selected > maxDashboardSelection {
 					selected = 0
 				}
 			default:

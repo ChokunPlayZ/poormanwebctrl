@@ -29,6 +29,13 @@ Plans follow dependency order:
 7. Apply firewalls and certificates.
 8. Install backup jobs.
 
+Database management is a declarative subgraph inside step 3. A database
+instance can contain multiple logical databases, users, tables/columns, and
+explicit permissions. Identifiers are validated before planning and quoted in
+provider-specific SQL. On a physical replica, this subgraph is deliberately
+not emitted: the primary owns schema and ACL changes, while replication carries
+them to the read-only instance.
+
 Managed files are intentionally owned by poorman and replaced on apply. Unrelated system configuration is left alone.
 
 Each apply also maintains `/var/lib/poorman/managed.json`. It records the
@@ -63,4 +70,4 @@ The v1 surface covers local installation, configuration, inspection, backup, and
 - rolling upgrades and automatic failover controllers;
 - a full-screen dashboard beyond the guided TUI.
 
-Those are intentionally not claimed as implemented. The guided TUI now includes a read-only long-term operations area for host stats, recent service logs, and backup inventory; it does not yet persist time-series metrics or provide remote/multi-host management.
+Those are intentionally not claimed as implemented. The TUI includes long-term read-only operations plus a guardrails and backups flow for enabling protections, running backups, and inspecting backup artifacts. It does not yet persist time-series metrics, provide remote/multi-host management, or verify restores automatically.

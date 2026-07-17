@@ -394,29 +394,247 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 	}
 	if isManagedMariaDBInstance(*d) && d.Role == "primary" {
 		addPromotedMariaDBPrimary(pn, *d, p)
+		if len(d.Databases) > 0 || len(d.Users) > 0 || len(d.ManagedPermissions()) > 0 {
+			addDatabaseObjects(pn, *d)
+		}
 		return
 	}
 	if !(d.Provider == "postgresql" && d.Role == "replica") && !isLocalMariaDBReplica(*d) {
 		pn.Add(enableService(p, service))
 	}
-	if d.Role != "replica" && d.Name != "" && d.User != "" {
-		if d.Provider == "postgresql" {
-			input := fmt.Sprintf("SELECT format('CREATE ROLE %%I LOGIN PASSWORD %%L', '%s', '${%s}') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')\\gexec\nSELECT format('ALTER ROLE %%I LOGIN PASSWORD %%L', '%s', '${%s}')\\gexec\nSELECT format('CREATE DATABASE %%I OWNER %%I', '%s', '%s') WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')\\gexec\nSELECT format('ALTER DATABASE %%I OWNER TO %%I', '%s', '%s')\\gexec\n", d.User, d.PasswordEnv, d.User, d.User, d.PasswordEnv, d.Name, d.User, d.Name, d.Name, d.User)
-			step := plan.AsUser("Create PostgreSQL application database and user", "postgres", "psql")
-			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
-			pn.Add(step)
-		} else {
-			input := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;\nCREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'localhost' IDENTIFIED BY '${%s}';\nGRANT ALL ON `%s`.* TO '%s'@'localhost';\nFLUSH PRIVILEGES;\n", d.Name, d.User, d.PasswordEnv, d.User, d.PasswordEnv, d.Name, d.User)
-			step := plan.Cmd("Create MariaDB application database and user", "mariadb", true, "--batch", "--skip-column-names", "--connect-timeout=10")
-			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
-			step.TimeoutSeconds = 60
-			pn.Add(step)
-		}
+	if d.Role != "replica" {
+		addDatabaseObjects(pn, *d)
 	}
 	if d.Role != "standalone" {
 		addReplication(pn, *d, p)
 	}
 }
+
+func addDatabaseObjects(pn *plan.Plan, d config.Database) {
+	databases := d.ManagedDatabases()
+	users := d.ManagedUsers()
+	if len(databases) == 0 && len(users) == 0 && len(d.Permissions) == 0 {
+		return
+	}
+	if d.Provider == "postgresql" {
+		if len(users) > 0 {
+			var sql strings.Builder
+			for _, user := range users {
+				fmt.Fprintf(&sql, "DO $poorman$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s LOGIN PASSWORD '${%s}'; ELSE ALTER ROLE %s LOGIN PASSWORD '${%s}'; END IF; END $poorman$;\n", user.Name, quotePostgres(user.Name), user.PasswordEnv, quotePostgres(user.Name), user.PasswordEnv)
+			}
+			description := "Create PostgreSQL database users"
+			if len(databases) == 1 && len(users) == 1 && d.Name != "" && d.User != "" {
+				description = "Create PostgreSQL application database and user"
+			}
+			step := plan.AsUser(description, "postgres", "psql", "-v", "ON_ERROR_STOP=1")
+			step.Input, step.Sensitive, step.SQLSecrets = sql.String(), true, true
+			pn.Add(step)
+		}
+		for _, database := range databases {
+			var sql strings.Builder
+			owner := database.Owner
+			if owner == "" {
+				owner = d.User
+			}
+			create := fmt.Sprintf("SELECT 'CREATE DATABASE %s' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')\\gexec\n", quotePostgres(database.Name), database.Name)
+			if owner != "" {
+				create = fmt.Sprintf("SELECT 'CREATE DATABASE %s OWNER %s' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')\\gexec\nALTER DATABASE %s OWNER TO %s;\n", quotePostgres(database.Name), quotePostgres(owner), database.Name, quotePostgres(database.Name), quotePostgres(owner))
+			}
+			sql.WriteString(create)
+			step := plan.AsUser("Create PostgreSQL database "+database.Name, "postgres", "psql", "-v", "ON_ERROR_STOP=1")
+			step.Input = sql.String()
+			pn.Add(step)
+			addPostgresTables(pn, database)
+		}
+		addPostgresPermissions(pn, d.ManagedPermissions())
+		return
+	}
+	for _, user := range users {
+		host := user.Host
+		if host == "" {
+			host = "localhost"
+		}
+		input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%s' IDENTIFIED BY '${%s}';\n", user.Name, host, user.PasswordEnv, user.Name, host, user.PasswordEnv)
+		step := plan.Cmd("Create MariaDB database user "+user.Name, "mariadb", true, mariaDBCommandArgs(d, "--batch", "--skip-column-names", "--connect-timeout=10")...)
+		step.Input, step.Sensitive, step.SQLSecrets = input, true, true
+		step.TimeoutSeconds = 60
+		pn.Add(step)
+	}
+	hosts := map[string]string{}
+	for _, user := range users {
+		host := user.Host
+		if host == "" {
+			host = "localhost"
+		}
+		hosts[user.Name] = host
+	}
+	for _, database := range databases {
+		var sql strings.Builder
+		charset := ""
+		if database.Charset != "" {
+			charset = " CHARACTER SET " + database.Charset
+		}
+		collation := ""
+		if database.Collation != "" {
+			collation = " COLLATE " + database.Collation
+		}
+		fmt.Fprintf(&sql, "CREATE DATABASE IF NOT EXISTS %s%s%s;\n", quoteMaria(database.Name), charset, collation)
+		if database.Owner != "" {
+			host := hosts[database.Owner]
+			if host == "" {
+				host = "localhost"
+			}
+			fmt.Fprintf(&sql, "GRANT ALL PRIVILEGES ON %s.* TO '%s'@'%s';\n", quoteMaria(database.Name), database.Owner, host)
+		}
+		for _, table := range database.Tables {
+			writeMariaTable(&sql, database.Name, table)
+		}
+		sql.WriteString("FLUSH PRIVILEGES;\n")
+		step := plan.Cmd("Create MariaDB database "+database.Name+" and tables", "mariadb", true, mariaDBCommandArgs(d, "--batch", "--skip-column-names", "--connect-timeout=10")...)
+		step.Input, step.Sensitive, step.SQLSecrets = sql.String(), true, true
+		step.TimeoutSeconds = 60
+		pn.Add(step)
+	}
+	addMariaDBPermissions(pn, d.ManagedPermissions(), users, d)
+}
+
+func mariaDBCommandArgs(d config.Database, args ...string) []string {
+	if isManagedMariaDBInstance(d) {
+		prefix := []string{"--protocol=socket", "--socket=" + mariaDBReplicaLayout(d).Socket}
+		return append(prefix, args...)
+	}
+	return args
+}
+
+func addPostgresTables(pn *plan.Plan, database config.DatabaseSpec) {
+	for _, table := range database.Tables {
+		schema := table.Schema
+		if schema == "" {
+			schema = "public"
+		}
+		var sql strings.Builder
+		fmt.Fprintf(&sql, "CREATE SCHEMA IF NOT EXISTS %s;\nCREATE TABLE IF NOT EXISTS %s.%s (", quotePostgres(schema), quotePostgres(schema), quotePostgres(table.Name))
+		for i, column := range table.Columns {
+			if i > 0 {
+				sql.WriteString(", ")
+			}
+			fmt.Fprintf(&sql, "%s %s", quotePostgres(column.Name), strings.TrimSpace(column.Type))
+			if !column.Nullable {
+				sql.WriteString(" NOT NULL")
+			}
+			if column.DefaultExpr != "" {
+				fmt.Fprintf(&sql, " DEFAULT %s", column.DefaultExpr)
+			}
+		}
+		if len(table.PrimaryKey) > 0 {
+			sql.WriteString(", PRIMARY KEY (")
+			for i, key := range table.PrimaryKey {
+				if i > 0 {
+					sql.WriteString(", ")
+				}
+				sql.WriteString(quotePostgres(key))
+			}
+			sql.WriteString(")")
+		}
+		sql.WriteString(");\n")
+		step := plan.AsUser("Create PostgreSQL table "+schema+"."+table.Name, "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", database.Name)
+		step.Input = sql.String()
+		pn.Add(step)
+	}
+}
+
+func addPostgresPermissions(pn *plan.Plan, permissions []config.DatabasePermission) {
+	for _, permission := range permissions {
+		privileges := normalizedPrivileges(permission.Privileges)
+		target := "DATABASE " + quotePostgres(permission.Database)
+		if permission.Schema != "" {
+			target = "SCHEMA " + quotePostgres(permission.Schema)
+		}
+		if permission.Table != "" {
+			schema := permission.Schema
+			if schema == "" {
+				schema = "public"
+			}
+			target = "TABLE " + quotePostgres(schema) + "." + quotePostgres(permission.Table)
+		}
+		grantOption := ""
+		if permission.GrantOption {
+			grantOption = " WITH GRANT OPTION"
+		}
+		input := fmt.Sprintf("GRANT %s ON %s TO %s%s;\n", privileges, target, quotePostgres(permission.User), grantOption)
+		step := plan.AsUser("Grant PostgreSQL permissions to "+permission.User, "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-d", permission.Database)
+		step.Input = input
+		pn.Add(step)
+	}
+}
+
+func writeMariaTable(sql *strings.Builder, database string, table config.DatabaseTable) {
+	fmt.Fprintf(sql, "CREATE TABLE IF NOT EXISTS %s.%s (", quoteMaria(database), quoteMaria(table.Name))
+	for i, column := range table.Columns {
+		if i > 0 {
+			sql.WriteString(", ")
+		}
+		fmt.Fprintf(sql, "%s %s", quoteMaria(column.Name), strings.TrimSpace(column.Type))
+		if !column.Nullable {
+			sql.WriteString(" NOT NULL")
+		}
+		if column.DefaultExpr != "" {
+			fmt.Fprintf(sql, " DEFAULT %s", column.DefaultExpr)
+		}
+	}
+	if len(table.PrimaryKey) > 0 {
+		sql.WriteString(", PRIMARY KEY (")
+		for i, key := range table.PrimaryKey {
+			if i > 0 {
+				sql.WriteString(", ")
+			}
+			sql.WriteString(quoteMaria(key))
+		}
+		sql.WriteString(")")
+	}
+	sql.WriteString(");\n")
+}
+
+func addMariaDBPermissions(pn *plan.Plan, permissions []config.DatabasePermission, users []config.DatabaseUser, database config.Database) {
+	hosts := map[string]string{}
+	for _, user := range users {
+		host := user.Host
+		if host == "" {
+			host = "localhost"
+		}
+		hosts[user.Name] = host
+	}
+	for _, permission := range permissions {
+		host := hosts[permission.User]
+		if host == "" {
+			host = "localhost"
+		}
+		target := quoteMaria(permission.Database) + ".*"
+		if permission.Table != "" {
+			target = quoteMaria(permission.Database) + "." + quoteMaria(permission.Table)
+		}
+		grantOption := ""
+		if permission.GrantOption {
+			grantOption = " WITH GRANT OPTION"
+		}
+		input := fmt.Sprintf("GRANT %s ON %s TO '%s'@'%s'%s;\nFLUSH PRIVILEGES;\n", normalizedPrivileges(permission.Privileges), target, permission.User, host, grantOption)
+		step := plan.Cmd("Grant MariaDB permissions to "+permission.User, "mariadb", true, mariaDBCommandArgs(database, "--batch", "--skip-column-names", "--connect-timeout=10")...)
+		step.Input, step.Sensitive, step.SQLSecrets = input, true, true
+		step.TimeoutSeconds = 60
+		pn.Add(step)
+	}
+}
+
+func normalizedPrivileges(privileges []string) string {
+	values := make([]string, 0, len(privileges))
+	for _, privilege := range privileges {
+		values = append(values, strings.ToUpper(strings.TrimSpace(privilege)))
+	}
+	return strings.Join(values, ", ")
+}
+
+func quotePostgres(value string) string { return `"` + strings.ReplaceAll(value, `"`, `""`) + `"` }
+func quoteMaria(value string) string    { return "`" + strings.ReplaceAll(value, "`", "``") + "`" }
 
 func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 	r := d.Replication
@@ -658,8 +876,9 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 		if s.WordPress != nil && writableWordPress {
 			pn.Add(plan.AsUser("Download WordPress for "+s.Domain, owner, "wp", "core", "download", "--path="+s.Root))
 			if c.Database != nil {
-				step := plan.AsUser("Create WordPress configuration for "+s.Domain, owner, "wp", "config", "create", "--path="+s.Root, "--dbname="+c.Database.Name, "--dbuser="+c.Database.User, "--prompt=dbpass")
-				step.Input, step.Sensitive = "${"+c.Database.PasswordEnv+"}\n", true
+				name, user, passwordEnv := c.Database.ApplicationCredentials()
+				step := plan.AsUser("Create WordPress configuration for "+s.Domain, owner, "wp", "config", "create", "--path="+s.Root, "--dbname="+name, "--dbuser="+user, "--prompt=dbpass")
+				step.Input, step.Sensitive = "${"+passwordEnv+"}\n", true
 				pn.Add(step)
 			}
 			wp := s.WordPress

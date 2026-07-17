@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "web_server": {
+    "provider": "nginx"
+  },
+  "database": {
+    "provider": "postgresql",
+    "role": "primary",
+    "users": [
+      {
+        "name": "app_owner",
+        "password_env": "POORMAN_APP_OWNER_PASSWORD"
+      },
+      {
+        "name": "app_reader",
+        "password_env": "POORMAN_APP_READER_PASSWORD"
+      }
+    ],
+    "databases": [
+      {
+        "name": "app",
+        "owner": "app_owner",
+        "tables": [
+          {
+            "name": "items",
+            "columns": [
+              {
+                "name": "id",
+                "type": "BIGINT"
+              },
+              {
+                "name": "name",
+                "type": "VARCHAR(255)"
+              }
+            ],
+            "primary_key": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "permissions": [
+      {
+        "user": "app_reader",
+        "database": "app",
+        "schema": "public",
+        "table": "items",
+        "privileges": [
+          "SELECT"
+        ]
+      }
+    ],
+    "replication": {
+      "user": "replicator",
+      "password_env": "POORMAN_REPLICATION_PASSWORD",
+      "allowed_cidr": "10.20.0.0/24",
+      "slot": "poorman_replica_1"
+    }
+  },
+  "access": {
+    "users": [
+      {
+        "name": "webadmin",
+        "home": "/home/webadmin",
+        "sftp_only": true
+      }
+    ]
+  },
+  "sites": [
+    {
+      "domain": "example.com",
+      "root": "/var/www/example.com",
+      "owner": "webadmin",
+      "runtime": "static"
+    }
+  ],
+  "firewall": {
+    "enabled": true
+  },
+  "backups": {
+    "enabled": true,
+    "destination": "/var/backups/poorman",
+    "schedule": "0 3 * * *"
+  }
+}
