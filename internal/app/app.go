@@ -750,7 +750,7 @@ func databaseManagementTUI(path string, reader *bufio.Reader, ui *terminalUI) er
 		d := c.Database
 		ensureDeclarativeDatabase(d)
 		ui.clear()
-		ui.brand("Database management", "Select a database to manage its tables and permissions")
+		ui.brand("Database management", "Manage databases, database users, tables, and permissions")
 		if d.Role == "replica" {
 			ui.panel("REPLICA", "This database is read-only. Schema, users, and grants are sourced from the primary through replication.")
 		}
@@ -759,6 +759,7 @@ func databaseManagementTUI(path string, reader *bufio.Reader, ui *terminalUI) er
 		for _, database := range databases {
 			options = append(options, database.Name)
 		}
+		options = append(options, "Manage database users")
 		options = append(options, "0")
 		choice := selectOption(reader, ui, "Database", options[0], options...)
 		switch {
@@ -769,6 +770,11 @@ func databaseManagementTUI(path string, reader *bufio.Reader, ui *terminalUI) er
 				continue
 			}
 			if err := createManagedDatabase(path, c, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case choice == "Manage database users":
+			if err := databaseUsersTUI(path, reader, ui); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
 			}
@@ -812,6 +818,182 @@ func createManagedDatabase(path string, c config.Config, reader *bufio.Reader, u
 	}
 	ui.success("Database created")
 	return nil
+}
+
+func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		if c.Database == nil {
+			return fmt.Errorf("database is not configured")
+		}
+		d := c.Database
+		ensureDeclarativeDatabase(d)
+		users := d.ManagedUsers()
+
+		ui.clear()
+		ui.brand("Database users", "Manage database accounts and their credentials")
+		if d.Role == "replica" {
+			ui.panel("REPLICA", "This database is read-only. Manage users on the primary; this view reflects replicated accounts.")
+		}
+		if len(users) == 0 {
+			ui.muted("No database users configured.")
+		} else {
+			for _, user := range users {
+				host := defaultValue(user.Host, "localhost")
+				fmt.Fprintf(ui, "%-24s %-16s %s\n", user.Name, host, defaultValue(user.PasswordEnv, "password not configured"))
+			}
+		}
+		ui.panel("ACTIONS", "1  create database user\n2  edit database user\n3  remove database user\n0  back")
+		choice := selectMenu(reader, ui, "Database users", "1",
+			selectorChoice{Value: "1", Label: "create database user"},
+			selectorChoice{Value: "2", Label: "edit database user"},
+			selectorChoice{Value: "3", Label: "remove database user"},
+			selectorChoice{Value: "0", Label: "back"},
+		)
+		switch choice {
+		case "1":
+			if d.Role == "replica" {
+				ui.warn("Replicas are read-only; create the user on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := createDatabaseUser(d, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			if err := config.Write(path, c); err != nil {
+				return err
+			}
+			ui.success("Database user created")
+		case "2":
+			if len(users) == 0 {
+				ui.warn("No database users exist; create one first.")
+				pause(reader, ui)
+				continue
+			}
+			if d.Role == "replica" {
+				ui.warn("Replicas are read-only; edit the user on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := editDatabaseUser(d, users, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			if err := config.Write(path, c); err != nil {
+				return err
+			}
+			ui.success("Database user updated")
+		case "3":
+			if len(users) == 0 {
+				ui.warn("No database users exist; create one first.")
+				pause(reader, ui)
+				continue
+			}
+			if d.Role == "replica" {
+				ui.warn("Replicas are read-only; remove the user on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := removeDatabaseUser(d, users, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			if err := config.Write(path, c); err != nil {
+				return err
+			}
+			ui.success("Database user removed and its permissions revoked")
+		case "0", "q", "Q":
+			return nil
+		}
+	}
+}
+
+func createDatabaseUser(d *config.Database, reader *bufio.Reader, ui *terminalUI) error {
+	name := prompt(reader, ui, "New database username", "app_user")
+	for _, user := range d.ManagedUsers() {
+		if user.Name == name {
+			return fmt.Errorf("database user %q already exists", name)
+		}
+	}
+	user := config.DatabaseUser{
+		Name:        name,
+		PasswordEnv: prompt(reader, ui, "Password environment variable", "POORMAN_DB_PASSWORD"),
+	}
+	if d.Provider == "mariadb" {
+		user.Host = selectOption(reader, ui, "MariaDB user host", "localhost", "localhost", "%")
+	}
+	d.Users = append(d.Users, user)
+	return nil
+}
+
+func editDatabaseUser(d *config.Database, users []config.DatabaseUser, reader *bufio.Reader, ui *terminalUI) error {
+	options := make([]string, 0, len(users)+1)
+	for _, user := range users {
+		options = append(options, user.Name)
+	}
+	options = append(options, "0")
+	name := selectOption(reader, ui, "Database user", options[0], options...)
+	if name == "0" {
+		return nil
+	}
+	for i := range d.Users {
+		if d.Users[i].Name != name {
+			continue
+		}
+		d.Users[i].PasswordEnv = prompt(reader, ui, "Password environment variable", d.Users[i].PasswordEnv)
+		if d.Provider == "mariadb" {
+			d.Users[i].Host = selectOption(reader, ui, "MariaDB user host", defaultValue(d.Users[i].Host, "localhost"), "localhost", "%")
+		}
+		return nil
+	}
+	return fmt.Errorf("database user %q is not explicitly managed", name)
+}
+
+func removeDatabaseUser(d *config.Database, users []config.DatabaseUser, reader *bufio.Reader, ui *terminalUI) error {
+	options := make([]string, 0, len(users)+1)
+	for _, user := range users {
+		options = append(options, user.Name)
+	}
+	options = append(options, "0")
+	name := selectOption(reader, ui, "Database user", options[0], options...)
+	if name == "0" {
+		return nil
+	}
+	for _, database := range d.ManagedDatabases() {
+		if database.Owner == name {
+			return fmt.Errorf("cannot remove %q while it owns database %q", name, database.Name)
+		}
+	}
+	if !yesNo(selectOption(reader, ui, "Remove database user "+name+"?", "n", "y", "n")) {
+		return nil
+	}
+	filtered := d.Users[:0]
+	for _, user := range d.Users {
+		if user.Name != name {
+			filtered = append(filtered, user)
+		}
+	}
+	d.Users = filtered
+	d.Permissions = filterDatabasePermissionsByUser(d.Permissions, name)
+	d.ACL = filterDatabasePermissionsByUser(d.ACL, name)
+	return nil
+}
+
+func filterDatabasePermissionsByUser(permissions []config.DatabasePermission, user string) []config.DatabasePermission {
+	filtered := permissions[:0]
+	for _, permission := range permissions {
+		if permission.User != user {
+			filtered = append(filtered, permission)
+		}
+	}
+	return filtered
 }
 
 func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *terminalUI) error {

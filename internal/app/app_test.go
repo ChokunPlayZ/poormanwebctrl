@@ -213,6 +213,25 @@ func TestTUIDatabaseManagerSetsACLForExistingUser(t *testing.T) {
 	}
 }
 
+func TestTUIDatabaseUserManagementCreatesUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-user.json")
+	if err := config.WriteDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n3\n1\nreader\nPOORMAN_READER_PASSWORD\n\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Database == nil || len(c.Database.Users) != 2 || c.Database.Users[1].Name != "reader" {
+		t.Fatalf("database users = %#v, want reader user", c.Database)
+	}
+}
+
 func TestTUIConfiguresPostgresReplica(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replica.json")
 	in := bytes.NewBufferString("1\nreplica.example.com\n\n\nphp\npostgresql\nreplica\n")
