@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
@@ -1744,7 +1746,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 		restore.Stdin = file
 		_ = restore.Run()
 	}()
-	raw := exec.Command("stty", "-icanon", "-echo", "min", "0", "time", "1")
+	raw := exec.Command("stty", "-icanon", "-echo", "min", "1", "time", "0")
 	raw.Stdin = file
 	if err := raw.Run(); err != nil {
 		return "", false
@@ -1890,7 +1892,7 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []string) (
 		restore.Stdin = file
 		_ = restore.Run()
 	}()
-	raw := exec.Command("stty", "-icanon", "-echo", "min", "0", "time", "1")
+	raw := exec.Command("stty", "-icanon", "-echo", "min", "1", "time", "0")
 	raw.Stdin = file
 	if err := raw.Run(); err != nil {
 		return "", false
@@ -1977,12 +1979,24 @@ func readRawByte(file *os.File) (byte, bool) {
 }
 
 func readRawMaybeByte(file *os.File) (byte, bool) {
-	var b [1]byte
-	n, err := file.Read(b[:])
-	if n == 1 {
-		return b[0], true
+	fd := int(file.Fd())
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return 0, false
 	}
-	return 0, err == nil && n > 0
+	defer func() { _ = syscall.SetNonblock(fd, false) }()
+	deadline := time.Now().Add(150 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		var b [1]byte
+		n, err := syscall.Read(fd, b[:])
+		if n == 1 {
+			return b[0], true
+		}
+		if err != syscall.EAGAIN && err != syscall.EWOULDBLOCK && err != nil {
+			return 0, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return 0, false
 }
 
 func escapeOption(fallback string, options []string) string {
