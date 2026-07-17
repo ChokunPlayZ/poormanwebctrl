@@ -932,7 +932,17 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if anyWordPress(c) && !writableWordPress {
 		pn.Warn("Skipped WordPress initialization because this database is a replica or promoted independent instance")
 	}
-	pn.Add(plan.Cmd("Validate "+c.WebServer.Provider+" configuration", validationCommand(c.WebServer.Provider), true, validationArgs(c.WebServer.Provider)...))
+	validation := plan.Cmd("Validate "+c.WebServer.Provider+" configuration", validationCommand(c.WebServer.Provider), true, validationArgs(c.WebServer.Provider)...)
+	if c.WebServer.Provider == "openlitespeed" {
+		// A fresh OpenLiteSpeed package ships an active Example vhost whose
+		// document-root ownership makes `openlitespeed -t` exit 1 even though it
+		// reports only these two warnings. Keep all other validator output fatal.
+		validation.AllowedFailureLines = []string{
+			"[config:server:vhosts:vhost:Example] Uid of /usr/local/lsws/Example/html/",
+			"[config:server:vhosts:vhost:Example] Gid of /usr/local/lsws/Example/html/",
+		}
+	}
+	pn.Add(validation)
 	pn.Add(restartService(p, service))
 	if c.WebServer.Provider == "openlitespeed" {
 		pn.Warn("OpenLiteSpeed include-managed configuration is edited as files and will not appear as editable state in WebAdmin")

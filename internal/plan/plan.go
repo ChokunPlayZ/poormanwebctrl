@@ -35,10 +35,14 @@ type Step struct {
 	TimeoutSeconds int
 	UnlessCommand  string
 	UnlessArgs     []string
-	StatePath      string
-	StateKey       string
-	StateContent   string
-	ServiceManager string
+	// AllowedFailureLines permits a failed command only when every non-empty
+	// output line contains one of these substrings. It is intentionally strict
+	// so a known warning cannot mask an unrelated error from the same command.
+	AllowedFailureLines []string
+	StatePath           string
+	StateKey            string
+	StateContent        string
+	ServiceManager      string
 }
 
 type Plan struct {

@@ -190,6 +190,16 @@ func TestOpenLiteSpeedUsesOfficialRepositoryAndInclude(t *testing.T) {
 			t.Errorf("OpenLiteSpeed plan missing %q", want)
 		}
 	}
+	for _, step := range p.Steps {
+		if step.Description != "Validate openlitespeed configuration" {
+			continue
+		}
+		if len(step.AllowedFailureLines) != 2 {
+			t.Fatalf("OpenLiteSpeed validation allowed warnings = %#v, want exact stock Example UID/GID warnings", step.AllowedFailureLines)
+		}
+		return
+	}
+	t.Fatal("OpenLiteSpeed validation step not found")
 }
 
 func TestOpenLiteSpeedDebianUsesPublishedLSPHPPackages(t *testing.T) {

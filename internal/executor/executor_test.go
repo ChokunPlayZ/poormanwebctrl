@@ -56,3 +56,36 @@ func TestApplyStopsBeforeNextStepWhenCanceled(t *testing.T) {
 		t.Fatalf("canceled operation produced output: %q", out.String())
 	}
 }
+
+func TestApplyAllowsOnlyConfiguredFailureLines(t *testing.T) {
+	var out bytes.Buffer
+	operation := plan.Plan{Steps: []plan.Step{{
+		Description:         "validate configuration",
+		Kind:                plan.Command,
+		Command:             "sh",
+		Args:                []string{"-c", "printf 'known uid warning\\nknown gid warning\\n'; exit 1"},
+		AllowedFailureLines: []string{"known uid warning", "known gid warning"},
+	}}}
+
+	if err := Apply(t.Context(), operation, bytes.NewReader(nil), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("continuing")) {
+		t.Fatalf("output = %q, want non-fatal warning notice", out.String())
+	}
+}
+
+func TestApplyRejectsAdditionalFailureOutput(t *testing.T) {
+	var out bytes.Buffer
+	operation := plan.Plan{Steps: []plan.Step{{
+		Description:         "validate configuration",
+		Kind:                plan.Command,
+		Command:             "sh",
+		Args:                []string{"-c", "printf 'known uid warning\\nsyntax error\\n'; exit 1"},
+		AllowedFailureLines: []string{"known uid warning"},
+	}}}
+
+	if err := Apply(t.Context(), operation, bytes.NewReader(nil), &out, &out); err == nil {
+		t.Fatal("expected additional validator error to remain fatal")
+	}
+}

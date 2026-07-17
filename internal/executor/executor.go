@@ -252,7 +252,12 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 		defer cancel()
 	}
 	cmd := exec.CommandContext(commandContext, command, args...)
-	cmd.Stdout, cmd.Stderr = out, errOut
+	var captured bytes.Buffer
+	if len(s.AllowedFailureLines) > 0 {
+		cmd.Stdout, cmd.Stderr = &captured, &captured
+	} else {
+		cmd.Stdout, cmd.Stderr = out, errOut
+	}
 	if s.Input != "" {
 		resolved, err := resolveEnv(s.Input, s.SQLSecrets)
 		if err != nil {
@@ -266,7 +271,40 @@ func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) 
 		// Steps that need input declare it explicitly through Input.
 		cmd.Stdin = nil
 	}
-	return cmd.Run()
+	err := cmd.Run()
+	if len(s.AllowedFailureLines) == 0 {
+		return err
+	}
+	if captured.Len() > 0 {
+		_, _ = out.Write(captured.Bytes())
+	}
+	if err != nil && failureContainsOnlyAllowedLines(captured.String(), s.AllowedFailureLines) {
+		fmt.Fprintln(out, "  only known non-fatal warnings were reported; continuing")
+		return nil
+	}
+	return err
+}
+
+func failureContainsOnlyAllowedLines(output string, allowed []string) bool {
+	found := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		matched := false
+		for _, pattern := range allowed {
+			if pattern != "" && strings.Contains(line, pattern) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func resolveEnv(input string, sqlEscape bool) (string, error) {
