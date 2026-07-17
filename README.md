@@ -59,6 +59,8 @@ poorman replica setup [-f FILE] [--from PRIMARY_FILE]
 
 When a configuration already exists, `poorman tui` opens the operations dashboard. Choose **long-term operations** for read-only host capacity, recent systemd journal logs for configured services, and the files currently present in the configured backup destination.
 
+Each successful apply records poorman-managed services in `/var/lib/poorman/managed.json`. This lets the dashboard show database instances from multiple configuration files on the same host and lets a later apply retire an old managed replica service when its port, data directory, or provider changes. Existing data directories are retained.
+
 Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains. Every host is planned independently, including its document root, aliases, runtime, WordPress setup, and managed server configuration.
 
 Choose **Stack settings** to adjust the web server, database and replication role, TLS email/enabled state, firewall, and backup destination/schedule after setup.

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -9,11 +10,23 @@ import (
 	"strings"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
+	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 	"github.com/chokunplayz/poormanwebctrl/internal/platform"
 )
 
 func Build(c config.Config, p platform.Platform) (plan.Plan, error) {
+	return build(c, p, "")
+}
+
+// BuildForConfig adds the host-local managed-service reconciliation around the
+// normal desired-state plan. The legacy Build entry point remains useful for
+// callers that only need a plan and do not want to persist host inventory.
+func BuildForConfig(c config.Config, p platform.Platform, configPath string) (plan.Plan, error) {
+	return build(c, p, configPath)
+}
+
+func build(c config.Config, p platform.Platform, configPath string) (plan.Plan, error) {
 	if c.WebServer.Provider == "openlitespeed" && p.Family == "alpine" {
 		return plan.Plan{}, fmt.Errorf("OpenLiteSpeed supports Debian/Ubuntu and RHEL-family packages, not Alpine")
 	}
@@ -23,6 +36,19 @@ func Build(c config.Config, p platform.Platform) (plan.Plan, error) {
 	result := plan.Plan{Platform: p.Distro}
 	packages := packageSet(c, p)
 	addPackageSteps(&result, p, packages)
+	if configPath != "" {
+		services := managed.DesiredServices(c, configPath)
+		content, err := json.Marshal(services)
+		if err != nil {
+			return plan.Plan{}, fmt.Errorf("encode managed service inventory: %w", err)
+		}
+		result.Add(plan.Dir("Create poorman managed state directory", managed.StateDir, "root", 0o755))
+		manager := "systemctl"
+		if p.Family == "alpine" {
+			manager = "rc-service"
+		}
+		result.Add(plan.ReconcileManagedStateWithManager("Reconcile poorman-managed services", managed.StatePath, configPath, string(content), manager))
+	}
 	if c.WebServer.Provider == "openlitespeed" {
 		addOpenLiteSpeedInstall(&result, c, p)
 	}
@@ -33,6 +59,14 @@ func Build(c config.Config, p platform.Platform) (plan.Plan, error) {
 	addFirewall(&result, c, p)
 	addTLS(&result, c, p)
 	addBackups(&result, c, p)
+	if configPath != "" {
+		services := managed.DesiredServices(c, configPath)
+		content, err := json.Marshal(services)
+		if err != nil {
+			return plan.Plan{}, fmt.Errorf("encode managed service inventory: %w", err)
+		}
+		result.Add(plan.ManagedState("Record poorman-managed services", managed.StatePath, configPath, string(content)))
+	}
 	return result, nil
 }
 
@@ -367,7 +401,7 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 	}
 	if d.Role != "replica" && d.Name != "" && d.User != "" {
 		if d.Provider == "postgresql" {
-			input := fmt.Sprintf("SELECT format('CREATE ROLE %%I LOGIN PASSWORD %%L', '%s', '${%s}') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')\\gexec\nSELECT format('CREATE DATABASE %%I OWNER %%I', '%s', '%s') WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')\\gexec\n", d.User, d.PasswordEnv, d.User, d.Name, d.User, d.Name)
+			input := fmt.Sprintf("SELECT format('CREATE ROLE %%I LOGIN PASSWORD %%L', '%s', '${%s}') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')\\gexec\nSELECT format('ALTER ROLE %%I LOGIN PASSWORD %%L', '%s', '${%s}')\\gexec\nSELECT format('CREATE DATABASE %%I OWNER %%I', '%s', '%s') WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '%s')\\gexec\nSELECT format('ALTER DATABASE %%I OWNER TO %%I', '%s', '%s')\\gexec\n", d.User, d.PasswordEnv, d.User, d.User, d.PasswordEnv, d.Name, d.User, d.Name, d.Name, d.User)
 			step := plan.AsUser("Create PostgreSQL application database and user", "postgres", "psql")
 			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 			pn.Add(step)
@@ -406,7 +440,7 @@ func addReplication(pn *plan.Plan, d config.Database, p platform.Platform) {
 		// replication SQL to this server.
 		pn.Add(restartService(p, "mariadb"))
 		if d.Role == "primary" {
-			input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", r.User, r.PasswordEnv, r.User)
+			input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", r.User, r.PasswordEnv, r.User, r.PasswordEnv, r.User)
 			step := plan.Cmd("Create MariaDB replication user", "mariadb", true)
 			step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 			pn.Add(step)
@@ -504,6 +538,10 @@ func mariaDBInstanceConfig(d config.Database, readOnly bool) string {
 
 func addLocalMariaDBReplica(pn *plan.Plan, d config.Database, p platform.Platform) {
 	layout := addMariaDBInstanceService(pn, d, p, true)
+	wait := plan.Cmd("Wait for MariaDB replica socket", "mariadb-admin", true,
+		"--protocol=socket", "--socket="+layout.Socket, "--connect-timeout=1", "--wait=1", "ping")
+	wait.TimeoutSeconds = 60
+	pn.Add(wait)
 
 	dump := plan.Cmd("Seed MariaDB replica from local primary", "mariadb-dump", true,
 		"--protocol=socket", "--all-databases", "--single-transaction", "--routines", "--events", "--triggers", "--flush-privileges", "--master-data=2", "--gtid", "--result-file="+layout.Seed)
@@ -511,6 +549,7 @@ func addLocalMariaDBReplica(pn *plan.Plan, d config.Database, p platform.Platfor
 	pn.Add(dump)
 	load := plan.Cmd("Load primary snapshot into MariaDB replica", "mariadb", true, "--protocol=socket", "--socket="+layout.Socket)
 	load.Input = fmt.Sprintf("SOURCE %s;\nFLUSH PRIVILEGES;\n", layout.Seed)
+	load.TimeoutSeconds = 60
 	load.UnlessCommand, load.UnlessArgs = "test", []string{"-e", layout.SeedMarker}
 	pn.Add(load)
 	mark := plan.Cmd("Mark MariaDB replica snapshot loaded", "touch", true, layout.SeedMarker)
@@ -563,7 +602,7 @@ func addPromotedMariaDBPrimary(pn *plan.Plan, d config.Database, p platform.Plat
 		step.TimeoutSeconds = 60
 		pn.Add(step)
 	}
-	input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", d.Replication.User, d.Replication.PasswordEnv, d.Replication.User)
+	input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%%' IDENTIFIED BY '${%s}';\nGRANT REPLICATION SLAVE ON *.* TO '%s'@'%%';\nFLUSH PRIVILEGES;\n", d.Replication.User, d.Replication.PasswordEnv, d.Replication.User, d.Replication.PasswordEnv, d.Replication.User)
 	step := plan.Cmd("Update replication user on promoted MariaDB instance", "mariadb", true, clientArgs...)
 	step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 	pn.Add(step)

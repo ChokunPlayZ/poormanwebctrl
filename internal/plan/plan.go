@@ -14,6 +14,8 @@ const (
 	Directory Kind = "directory"
 	File      Kind = "file"
 	Line      Kind = "line"
+	State     Kind = "state"
+	Reconcile Kind = "reconcile"
 )
 
 type Step struct {
@@ -33,6 +35,10 @@ type Step struct {
 	TimeoutSeconds int
 	UnlessCommand  string
 	UnlessArgs     []string
+	StatePath      string
+	StateKey       string
+	StateContent   string
+	ServiceManager string
 }
 
 type Plan struct {
@@ -69,6 +75,10 @@ func (p Plan) Print(w io.Writer) {
 			detail = fmt.Sprintf("%smanage-file -m %04o %s", prefix, mode(step.Mode, 0o644), step.Path)
 		case Line:
 			detail = fmt.Sprintf("%sensure-line %s", prefix, step.Path)
+		case State:
+			detail = fmt.Sprintf("%supdate managed service inventory %s", prefix, step.StatePath)
+		case Reconcile:
+			detail = fmt.Sprintf("%sreconcile managed services %s", prefix, step.StatePath)
 		default:
 			detail = prefix + renderCommand(step.Command, step.Args)
 			if step.Sensitive {
@@ -122,4 +132,24 @@ func ManagedFile(description, path, content, owner string, mode uint32) Step {
 
 func EnsureLine(description, path, line string) Step {
 	return Step{Description: description, Kind: Line, Path: path, Content: line, NeedsRoot: true}
+}
+
+// ManagedState records the desired services for one configuration after the
+// rest of the plan has completed. The executor merges this value with other
+// configuration entries instead of replacing the whole inventory.
+func ManagedState(description, path, key, content string) Step {
+	return Step{Description: description, Kind: State, StatePath: path, StateKey: key, StateContent: content, NeedsRoot: true}
+}
+
+// ReconcileManagedState lets the executor stop old services belonging to this
+// configuration before the new instance is created. This makes a changed
+// replica port, data directory, or provider converge cleanly.
+func ReconcileManagedState(description, path, key, content string) Step {
+	return Step{Description: description, Kind: Reconcile, StatePath: path, StateKey: key, StateContent: content, NeedsRoot: true}
+}
+
+func ReconcileManagedStateWithManager(description, path, key, content, manager string) Step {
+	step := ReconcileManagedState(description, path, key, content)
+	step.ServiceManager = manager
+	return step
 }

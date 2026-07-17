@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 )
 
@@ -29,6 +31,10 @@ func Apply(ctx context.Context, p plan.Plan, in io.Reader, out, errOut io.Writer
 			err = applyFile(ctx, step, in, out, errOut)
 		case plan.Line:
 			err = applyLine(ctx, step, in, out, errOut)
+		case plan.State:
+			err = applyManagedState(ctx, step, in, out, errOut)
+		case plan.Reconcile:
+			err = reconcileManagedState(ctx, step, out, errOut)
 		default:
 			err = run(ctx, step, in, out, errOut)
 		}
@@ -36,6 +42,109 @@ func Apply(ctx context.Context, p plan.Plan, in io.Reader, out, errOut io.Writer
 			return fmt.Errorf("step %d (%s): %w", i+1, step.Description, err)
 		}
 	}
+	return nil
+}
+
+func applyManagedState(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) error {
+	inventory, err := managed.Load(s.StatePath)
+	if err != nil {
+		return err
+	}
+	var services []managed.Service
+	if err := json.Unmarshal([]byte(s.StateContent), &services); err != nil {
+		return fmt.Errorf("decode desired managed services: %w", err)
+	}
+	inventory = managed.Apply(inventory, s.StateKey, services)
+	content, err := managed.Marshal(inventory)
+	if err != nil {
+		return err
+	}
+	file := plan.ManagedFile("Update managed service inventory", s.StatePath, string(content), "root", 0o644)
+	return applyFile(ctx, file, in, out, errOut)
+}
+
+func reconcileManagedState(ctx context.Context, s plan.Step, out, errOut io.Writer) error {
+	inventory, err := managed.Load(s.StatePath)
+	if err != nil {
+		return err
+	}
+	var desired []managed.Service
+	if err := json.Unmarshal([]byte(s.StateContent), &desired); err != nil {
+		return fmt.Errorf("decode desired managed services: %w", err)
+	}
+	wanted := map[string]managed.Service{}
+	for _, service := range desired {
+		wanted[service.Key] = service
+	}
+	for _, previous := range inventory.Services {
+		if previous.ConfigPath != managed.ConfigKey(s.StateKey) {
+			continue
+		}
+		current, ok := wanted[previous.Key]
+		if ok && !managedServiceChanged(previous, current) {
+			continue
+		}
+		if previous.Name == "" {
+			continue
+		}
+		if err := stopManagedService(ctx, s.ServiceManager, previous, out, errOut); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func managedServiceChanged(previous, current managed.Service) bool {
+	if previous.Name != current.Name || previous.Provider != current.Provider {
+		return true
+	}
+	if previous.Kind == "database" {
+		return previous.Port != current.Port || previous.DataDir != current.DataDir
+	}
+	return false
+}
+
+func stopManagedService(ctx context.Context, manager string, service managed.Service, out, errOut io.Writer) error {
+	serviceName := service.Name
+	args := []string{"disable", "--now", serviceName}
+	if service.Provider == "postgresql" && service.Role == "replica" && service.DataDir != "" {
+		manager = "pg_ctl"
+		args = []string{"-D", service.DataDir, "stop", "-m", "fast"}
+	}
+	if manager == "" {
+		manager = "systemctl"
+	}
+	if manager == "rc-service" {
+		args = []string{serviceName, "stop"}
+	}
+	command := manager
+	if manager == "pg_ctl" {
+		if os.Geteuid() == 0 {
+			args = append([]string{"-u", "postgres", "--", manager}, args...)
+			command = "runuser"
+		} else {
+			args = append([]string{"-n", "-u", "postgres", "--", manager}, args...)
+			command = "sudo"
+		}
+	}
+	if os.Geteuid() != 0 {
+		if command != "sudo" {
+			args = append([]string{"-n", manager}, args...)
+			command = "sudo"
+		}
+	}
+	cmd := exec.CommandContext(ctx, command, args...)
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Run(); err != nil {
+		detail := strings.ToLower(output.String())
+		if strings.Contains(detail, "not found") || strings.Contains(detail, "does not exist") || strings.Contains(detail, "loaded: not-found") || strings.Contains(detail, "no server running") || strings.Contains(detail, "not running") {
+			fmt.Fprintf(out, "  old managed service %s is already absent; skipped\n", serviceName)
+			return nil
+		}
+		return fmt.Errorf("stop old managed service %s: %w: %s", serviceName, err, strings.TrimSpace(output.String()))
+	}
+	fmt.Fprintf(out, "  stopped old managed service %s\n", serviceName)
 	return nil
 }
 

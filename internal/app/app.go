@@ -20,6 +20,7 @@ import (
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 	"github.com/chokunplayz/poormanwebctrl/internal/executor"
 	"github.com/chokunplayz/poormanwebctrl/internal/health"
+	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 	"github.com/chokunplayz/poormanwebctrl/internal/ops"
 	"github.com/chokunplayz/poormanwebctrl/internal/plan"
 	"github.com/chokunplayz/poormanwebctrl/internal/platform"
@@ -604,7 +605,7 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 				pause(reader, ui)
 			}
 		case "7":
-			if err := operationsTUI(ctx, c, reader, ui); err != nil {
+			if err := operationsTUI(ctx, c, path, reader, ui); err != nil {
 				ui.warn("Operations unavailable: " + err.Error())
 				pause(reader, ui)
 			}
@@ -904,8 +905,8 @@ func parseAliases(value string) []string {
 	return aliases
 }
 
-func operationsTUI(ctx context.Context, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
-	services := configuredServices(c)
+func operationsTUI(ctx context.Context, c config.Config, path string, reader *bufio.Reader, ui *terminalUI) error {
+	services := configuredServicesFor(c, path)
 	for {
 		ui.clear()
 		ui.brand("Long-term operations", "Inspect the host and keep services healthy")
@@ -975,13 +976,52 @@ func operationsTUI(ctx context.Context, c config.Config, reader *bufio.Reader, u
 }
 
 func configuredServices(c config.Config) []string {
-	services := []string{webServiceName(c.WebServer.Provider)}
-	if c.Database != nil {
-		databaseService := c.Database.Provider
-		if managed := managedMariaDBService(c); managed != "" {
-			databaseService = managed
+	return configuredServicesFor(c, "")
+}
+
+func databaseInstances(c config.Config, path string) []managed.Service {
+	inventory := managed.Inventory{}
+	if inventory, err := managed.Load(managed.StatePath); err == nil {
+		return databaseInstancesFrom(inventory, c, path)
+	}
+	return databaseInstancesFrom(inventory, c, path)
+}
+
+func databaseInstancesFrom(inventory managed.Inventory, c config.Config, path string) []managed.Service {
+	instances := make([]managed.Service, 0)
+	seen := map[string]bool{}
+	for _, service := range inventory.Services {
+		if service.Kind != "database" || seen[service.Key] {
+			continue
 		}
-		services = append(services, databaseService)
+		instances = append(instances, service)
+		seen[service.Key] = true
+	}
+	for _, service := range managed.DesiredServices(c, path) {
+		if service.Kind != "database" || seen[service.Key] {
+			continue
+		}
+		instances = append(instances, service)
+		seen[service.Key] = true
+	}
+	sort.Slice(instances, func(i, j int) bool {
+		if instances[i].Name == instances[j].Name {
+			return instances[i].Key < instances[j].Key
+		}
+		return instances[i].Name < instances[j].Name
+	})
+	return instances
+}
+
+func configuredServicesFor(c config.Config, path string) []string {
+	services := []string{webServiceName(c.WebServer.Provider)}
+	seen := map[string]bool{}
+	for _, service := range databaseInstances(c, path) {
+		if seen[service.Name] {
+			continue
+		}
+		seen[service.Name] = true
+		services = append(services, service.Name)
 	}
 	if c.Access.FTP.Enabled {
 		services = append(services, "vsftpd")
@@ -1169,7 +1209,16 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 			site += fmt.Sprintf(" + %d more", len(c.Sites)-1)
 		}
 	}
-	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s (%s)\nsite      %s\nconfig    %s", c.WebServer.Provider, db, role, site, path))
+	databaseLine := fmt.Sprintf("%s (%s)", db, role)
+	instances := databaseInstances(c, path)
+	if len(instances) > 1 {
+		labels := make([]string, 0, len(instances))
+		for _, instance := range instances {
+			labels = append(labels, managed.InstanceLabel(instance))
+		}
+		databaseLine += "\ninstances " + strings.Join(labels, ", ")
+	}
+	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s\nsite      %s\nconfig    %s", c.WebServer.Provider, databaseLine, site, path))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
 	replicationAction := "replication status"
 	if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
@@ -1346,7 +1395,7 @@ func buildPlan(path string) (interface{ Print(io.Writer) }, error) {
 	if err != nil {
 		return nil, err
 	}
-	return provider.WebServer(c, p)
+	return provider.BuildForConfig(c, p, path)
 }
 
 func planCommand(args []string, out io.Writer) error {
@@ -1392,7 +1441,7 @@ func applyCommand(ctx context.Context, args []string, in io.Reader, out, errOut 
 	if err != nil {
 		return err
 	}
-	p, err := provider.WebServer(c, plat)
+	p, err := provider.BuildForConfig(c, plat, *path)
 	if err != nil {
 		return err
 	}

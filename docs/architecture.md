@@ -31,6 +31,14 @@ Plans follow dependency order:
 
 Managed files are intentionally owned by poorman and replaced on apply. Unrelated system configuration is left alone.
 
+Each apply also maintains `/var/lib/poorman/managed.json`. It records the
+configuration file and system service identity for every poorman-managed
+service. The inventory is merged per configuration, so multiple configuration
+files can safely manage separate database instances on one host. Before an
+apply provisions a changed instance, the executor stops the previous managed
+service; data directories are deliberately retained for recovery or manual
+migration.
+
 ## Replication safety model
 
 PostgreSQL streaming replication and MariaDB GTID replication share inventory concepts but have provider-specific actions. Promotion is a manual, guarded operation rather than automatic failover. Correct promotion requires external fencing, client redirection, verification, and a config update.

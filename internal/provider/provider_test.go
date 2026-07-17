@@ -198,6 +198,7 @@ func TestSameMachineMariaDBReplicaUsesIndependentService(t *testing.T) {
 		"Initialize MariaDB replica data directory":           false,
 		"Install independent MariaDB replica service":         false,
 		"Restart independent MariaDB replica service":         false,
+		"Wait for MariaDB replica socket":                     false,
 		"Seed MariaDB replica from local primary":             false,
 		"Load primary snapshot into MariaDB replica":          false,
 		"Attach independent MariaDB replica to local primary": false,
@@ -217,6 +218,14 @@ func TestSameMachineMariaDBReplicaUsesIndependentService(t *testing.T) {
 				t.Fatalf("independent service is not isolated from primary failure: %#v", step)
 			}
 		}
+		if step.Description == "Wait for MariaDB replica socket" {
+			if step.Command != "mariadb-admin" || step.TimeoutSeconds != 60 || !strings.Contains(strings.Join(step.Args, " "), "--socket=/run/poorman-mariadb-replica-3307/mariadb.sock") {
+				t.Fatalf("replica readiness check is incomplete: %#v", step)
+			}
+		}
+		if step.Description == "Load primary snapshot into MariaDB replica" && step.TimeoutSeconds != 60 {
+			t.Fatalf("snapshot load has no 60-second timeout: %#v", step)
+		}
 		if step.Description == "Attach independent MariaDB replica to local primary" && !strings.Contains(strings.Join(step.Args, " "), "--socket=/run/poorman-mariadb-replica-3307/mariadb.sock") {
 			t.Fatalf("replication SQL does not target the replica socket: %v", step.Args)
 		}
@@ -230,6 +239,30 @@ func TestSameMachineMariaDBReplicaUsesIndependentService(t *testing.T) {
 		if !found {
 			t.Errorf("plan missing %q", description)
 		}
+	}
+}
+
+func TestBuildForConfigAddsManagedServiceReconciliation(t *testing.T) {
+	c := config.Default()
+	c.Database.Role = "replica"
+	c.Database.Port = 3307
+	c.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	c.Database.Replication.PrimaryHost = "127.0.0.1"
+	p, err := BuildForConfig(c, platform.Platform{Distro: "debian", Family: "debian"}, "/etc/poorman/replica.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reconcile, state bool
+	for _, step := range p.Steps {
+		if step.Kind == plan.Reconcile {
+			reconcile = true
+		}
+		if step.Kind == plan.State {
+			state = true
+		}
+	}
+	if !reconcile || !state {
+		t.Fatalf("managed service steps missing: reconcile=%t state=%t", reconcile, state)
 	}
 }
 

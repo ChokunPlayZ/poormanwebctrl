@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
+	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 )
 
 func TestInputReaderPreservesExistingBuffer(t *testing.T) {
@@ -462,6 +463,28 @@ func TestBackupScriptPathTargetsIndependentMariaDBReplica(t *testing.T) {
 	c.Database.Replication.PrimaryHost = "127.0.0.1"
 	if got := backupScriptPath(c); got != "/usr/local/sbin/poorman-backup-poorman-mariadb-replica-3307" {
 		t.Fatalf("backup script = %q", got)
+	}
+}
+
+func TestDatabaseInstancesIncludesPrimaryAndReplica(t *testing.T) {
+	primaryPath := filepath.Join(t.TempDir(), "primary.json")
+	replicaPath := filepath.Join(t.TempDir(), "replica.json")
+	primary := config.Default()
+	replica := config.Default()
+	replica.Database.Role = "replica"
+	replica.Database.Port = 3307
+	replica.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	replica.Database.Replication.PrimaryHost = "127.0.0.1"
+	inventory := managed.Inventory{Version: 1, Services: append(
+		managed.DesiredServices(primary, primaryPath),
+		managed.DesiredServices(replica, replicaPath)...,
+	)}
+	instances := databaseInstancesFrom(inventory, primary, primaryPath)
+	if len(instances) != 2 {
+		t.Fatalf("database instances = %#v, want primary and replica", instances)
+	}
+	if managed.InstanceLabel(instances[0]) == managed.InstanceLabel(instances[1]) {
+		t.Fatalf("database instance labels are not distinct: %#v", instances)
 	}
 }
 
