@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -65,8 +66,11 @@ func operationsTUI(ctx context.Context, c config.Config, path string, reader *bu
 			if n, err := parsePositive(lineCount); err == nil {
 				lines = n
 			}
-			if err := ops.Logs(ctx, service, lines, ui); err != nil {
+			var logs bytes.Buffer
+			if err := ops.Logs(ctx, service, lines, &logs); err != nil {
 				ui.warn(err.Error())
+			} else {
+				ui.logOutput(logs.String())
 			}
 			pause(reader, ui)
 		case "3":

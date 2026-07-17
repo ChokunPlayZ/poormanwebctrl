@@ -462,74 +462,33 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 		choice := dashboardChoice(ctx, in, reader, ui, c, path)
 		switch choice {
 		case "1":
-			if err := planCommand([]string{"-f", path}, ui); err != nil {
-				ui.warn("Plan unavailable: " + err.Error())
+			if err := deploymentTUI(ctx, path, reader, ui); err != nil {
+				ui.warn("Deployment unavailable: " + err.Error())
+				pause(reader, ui)
 			}
-			pause(reader, ui)
 		case "2":
-			if err := applyCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
-				ui.warn("Apply failed: " + err.Error())
-			}
-			pause(reader, ui)
-		case "3":
-			if err := statusCommand(ctx, []string{"-f", path}, ui); err != nil {
-				ui.warn("Health warning: " + err.Error())
-			}
-			pause(reader, ui)
-		case "4":
-			if !c.Backups.Enabled {
-				ui.warn("Backups are disabled in Stack settings.")
-				pause(reader, ui)
-				continue
-			}
-			if err := backupCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
-				ui.warn("Backup failed: " + err.Error())
-			}
-			pause(reader, ui)
-		case "5":
-			if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
-				ui.warn("Replication is not configured. Use guided replica setup or Stack settings first.")
-				pause(reader, ui)
-				continue
-			}
-			if err := replicaCommand(ctx, []string{"status", "-f", path}, reader, ui, ui); err != nil {
-				ui.warn("Replication status unavailable: " + err.Error())
-			}
-			pause(reader, ui)
-		case "6":
-			if err := firewallTUI(ctx, path, reader, ui); err != nil {
-				ui.warn("Firewall operation unavailable: " + err.Error())
-				pause(reader, ui)
-			}
-		case "7":
 			if err := operationsTUI(ctx, c, path, reader, ui); err != nil {
-				ui.warn("Operations unavailable: " + err.Error())
+				ui.warn("Monitoring unavailable: " + err.Error())
 				pause(reader, ui)
 			}
-		case "8":
-			if err := vhostsTUI(path, reader, ui); err != nil {
-				ui.warn("Virtual host management unavailable: " + err.Error())
+		case "3":
+			if err := websitesTUI(path, reader, ui); err != nil {
+				ui.warn("Website management unavailable: " + err.Error())
 				pause(reader, ui)
 			}
-		case "9":
-			if err := stackSettingsTUI(path, reader, ui); err != nil {
-				ui.warn("Stack settings unavailable: " + err.Error())
-				pause(reader, ui)
-			}
-		case "10":
-			err := guidedReplicaSetupTUI(ctx, path, reader, ui)
-			if err != nil {
-				ui.warn("Replica setup unavailable: " + err.Error())
-				pause(reader, ui)
-			}
-		case "11":
-			if err := protectionTUI(ctx, path, reader, ui); err != nil {
-				ui.warn("Protection settings unavailable: " + err.Error())
-				pause(reader, ui)
-			}
-		case "12":
-			if err := databaseManagementTUI(path, reader, ui); err != nil {
+		case "4":
+			if err := databaseTUI(ctx, path, reader, ui); err != nil {
 				ui.warn("Database management unavailable: " + err.Error())
+				pause(reader, ui)
+			}
+		case "5":
+			if err := securityTUI(ctx, path, reader, ui); err != nil {
+				ui.warn("Security and backups unavailable: " + err.Error())
+				pause(reader, ui)
+			}
+		case "6":
+			if err := updateManagerTUI(ctx, reader, ui); err != nil {
+				ui.warn("Update manager unavailable: " + err.Error())
 				pause(reader, ui)
 			}
 		case "0", "q", "Q":

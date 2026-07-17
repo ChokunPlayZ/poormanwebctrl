@@ -234,6 +234,13 @@ func tlsPackages(c config.Config, p platform.Platform) []string {
 		return nil
 	}
 	packages := []string{"certbot"}
+	if c.TLS.DNS != nil {
+		prefix := "python3-"
+		if p.Family == "alpine" {
+			prefix = ""
+		}
+		packages = append(packages, prefix+"certbot-dns-"+c.TLS.DNS.Provider)
+	}
 	switch c.WebServer.Provider {
 	case "nginx":
 		if p.Family == "alpine" {

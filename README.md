@@ -13,13 +13,14 @@
 - Linux users, SSH keys, and SFTP-only groups
 - Explicit opt-in vsftpd support (SFTP is the safe default)
 - WordPress download, configuration, and installation with wp-cli
-- Per-domain Let's Encrypt certificates for Nginx and Apache
+- Per-domain Let's Encrypt certificates for Nginx and Apache, using HTTP or automated DNS validation
 - UFW/firewalld rules, including CIDR-scoped database replication
 - Scheduled site/database backups and on-demand backups, with configurable local retention
 - Optional offsite S3 copies with separate retention, AWS profiles/regions, and S3-compatible endpoints
 - Local service, configuration, and virtual-host health checks
 - TUI firewall management: status, policy preview/apply, and guarded disable
 - TUI long-term operations: host resource stats, service logs, and backup inventory
+- TUI update manager: review available OS package updates and apply only selected packages
 - TUI guardrails and recovery: enable HTTPS, firewall, and backups; edit backup settings; run backups; and inspect backup artifacts
 
 ## Build and start
@@ -62,6 +63,8 @@ poorman replica setup -f REPLICA_FILE --from PRIMARY_FILE
 
 When a configuration already exists, `poorman tui` opens the operations dashboard. Choose **long-term operations** for read-only host capacity, recent systemd journal logs for configured services, and the files currently present in the configured backup destination.
 
+Choose **Update manager** to inspect the distribution package manager's current update list, select individual packages (or all of them), review the exact package command, and confirm before applying. Checking is read-only and uses the host's existing package metadata; refresh that metadata with the distribution's normal tools when needed.
+
 Each successful apply records poorman-managed services in `/var/lib/poorman/managed.json`. This lets the dashboard show the primary and local replica from one configuration, as well as database instances from remote-host configurations, and lets a later apply retire an old managed replica service when its port, data directory, or provider changes. Existing data directories are retained.
 
 After the first apply, poorman is authoritative for every configuration file it records in that inventory. Every apply rewrites all current managed virtual hosts, removes obsolete managed vhost files after a site removal or web-server switch, and restores explicit service-appropriate ownership. Manual edits to poorman-managed configuration files are intentionally overwritten. The server login MOTD states this policy.
@@ -75,6 +78,25 @@ Choose **Stack settings** to adjust the web server, database and replication rol
 Choose **Database management** in the dashboard to add logical databases, database users, tables, and explicit permissions. You can also remove database, user, table, and ACL definitions. Removal is deliberately non-destructive: it updates the desired configuration and clears dependent definitions, but does not drop live databases, tables, accounts, or existing grants. The plan validates and quotes all managed identifiers. The older `database.name`, `database.user`, and `database.password_env` fields remain supported as a single-database shorthand; use `database.databases`, `database.users`, and `database.permissions` for a full chain. See [the database-chain example](examples/database-chain.json).
 
 Choose **guardrails & backups** for the fast operational path: review per-domain HTTPS coverage, turn the firewall or scheduled backups on or off, set the shared certificate contact email, configure the backup destination and cron schedule, run a backup immediately, or inspect the backup inventory.
+
+### DNS-validated certificates
+
+Set `tls.dns` (or choose **certificate validation** under **guardrails & backups**) when port 80 cannot receive the Let's Encrypt challenge. Cloudflare and Route 53 are supported and renew automatically through Certbot's official DNS plugins. DNS validation also provides the foundation for wildcard certificates, although virtual-host aliases currently remain ordinary hostnames.
+
+Cloudflare uses an API-token file that already exists on the target server. Poorman stores only its path. Restrict the token to `Zone:DNS:Edit` for the required zones and protect the file with mode `0600`:
+
+```json
+"tls": {
+  "email": "admin@example.com",
+  "dns": {
+    "provider": "cloudflare",
+    "credentials_file": "/etc/poorman/cloudflare.ini",
+    "propagation_seconds": 60
+  }
+}
+```
+
+The credentials file contains `dns_cloudflare_api_token = ...`. Route 53 uses `"dns": {"provider": "route53"}` and Certbot's normal AWS credential chain. Because apply runs Certbot as root, place shared AWS credentials under root's home or use an instance role with the minimum Route 53 permissions. Switching back to HTTP validation is done by removing `tls.dns`.
 
 ### Backup retention and S3
 

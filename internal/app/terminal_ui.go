@@ -29,9 +29,22 @@ type terminalUI struct {
 }
 
 const (
+	colorCyan    = "38;5;45"
+	colorBlue    = "38;5;75"
+	colorGreen   = "38;5;42"
+	colorYellow  = "38;5;214"
+	colorRed     = "38;5;196"
+	colorMagenta = "38;5;207"
+	colorPurple  = "38;5;141"
+	colorWhite   = "38;5;255"
+	colorMuted   = "38;5;244"
+	colorBorder  = "38;5;60"
+)
+
+const (
 	panelInnerWidth       = 70
 	dashboardLabelWidth   = 26
-	maxDashboardSelection = 12
+	maxDashboardSelection = 6
 )
 
 func newTerminalUI(w io.Writer) *terminalUI {
@@ -70,9 +83,9 @@ func (ui *terminalUI) brand(section, subtitle string) {
 		fmt.Fprintln(ui, strings.Repeat("-", 72))
 		return
 	}
-	fmt.Fprintln(ui, ui.paint("38;5;45;1", "◆ POORMAN")+ui.paint("38;5;244", "  /  ")+ui.paint("38;5;255;1", section))
-	fmt.Fprintln(ui, ui.paint("38;5;244", "  "+subtitle))
-	fmt.Fprintln(ui, ui.paint("38;5;238", "  "+strings.Repeat("─", 72)))
+	fmt.Fprintln(ui, ui.paint(colorCyan+";1", "◆ POORMAN")+ui.paint(colorPurple, "  /  ")+ui.paint(colorWhite+";1", section))
+	fmt.Fprintln(ui, ui.paint(colorBlue, "  "+subtitle))
+	fmt.Fprintln(ui, ui.paint(colorBorder, "  "+strings.Repeat("─", 72)))
 }
 
 func (ui *terminalUI) panel(title, body string) {
@@ -87,11 +100,15 @@ func (ui *terminalUI) panel(title, body string) {
 	if lineWidth < 0 {
 		lineWidth = 0
 	}
-	fmt.Fprintln(ui, ui.paint("38;5;238", "╭─ ")+ui.paint("38;5;45;1", title)+ui.paint("38;5;238", " "+strings.Repeat("─", lineWidth)+"╮"))
+	fmt.Fprintln(ui, ui.paint(colorBorder, "╭─ ")+ui.paint(colorMagenta+";1", title)+ui.paint(colorBorder, " "+strings.Repeat("─", lineWidth)+"╮"))
 	for _, line := range lines {
-		fmt.Fprintf(ui, "%s %s %s\n", ui.paint("38;5;238", "│"), padPanelLine(line, innerWidth), ui.paint("38;5;238", "│"))
+		fmt.Fprintf(ui, "%s %s %s\n", ui.paint(colorBorder, "│"), padPanelLine(line, innerWidth), ui.paint(colorBorder, "│"))
 	}
-	fmt.Fprintln(ui, ui.paint("38;5;238", "╰"+strings.Repeat("─", innerWidth+2)+"╯"))
+	fmt.Fprintln(ui, ui.paint(colorBorder, "╰"+strings.Repeat("─", innerWidth+2)+"╯"))
+}
+
+func (ui *terminalUI) field(label, value string) string {
+	return ui.paint(colorBlue+";1", fmt.Sprintf("%-9s", label)) + value
 }
 
 func displayWidth(value string) int {
@@ -150,34 +167,91 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 		}
 		databaseLine += "\ninstances " + strings.Join(labels, ", ")
 	}
-	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s\nsite      %s\nconfig    %s", c.WebServer.Provider, databaseLine, site, path))
+	ui.panel("STACK", strings.Join([]string{
+		ui.field("web", c.WebServer.Provider),
+		ui.field("database", databaseLine),
+		ui.field("site", site),
+		ui.field("config", path),
+	}, "\n"))
 	ui.panel("MANAGED SERVICES", ui.managedServiceStatusLines(statuses))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(siteTLSLabel(c), c.AnySiteTLSEnabled()), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
-	replicationAction := "replication status"
-	if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
-		replicationAction += " (not configured)"
-	}
-	backupAction := "run backup"
-	if !c.Backups.Enabled {
-		backupAction += " (disabled)"
-	}
 	actions := []string{
-		dashboardActionLine(1, -1, selected, "preview plan", ""),
-		dashboardActionLine(2, -1, selected, "apply configuration", ""),
-		dashboardActionLine(3, -1, selected, "health status", ""),
-		dashboardActionLine(4, -1, selected, backupAction, ""),
-		dashboardActionLine(5, -1, selected, replicationAction, ""),
-		dashboardActionLine(6, -1, selected, "Firewall management", ""),
-		dashboardActionLine(7, -1, selected, "long-term operations", ""),
-		dashboardActionLine(8, -1, selected, "Virtual hosts", ""),
-		dashboardActionLine(9, -1, selected, "Stack settings", ""),
-		dashboardActionLine(10, -1, selected, "guided replica setup", ""),
-		dashboardActionLine(11, -1, selected, "guardrails & backups", ""),
-		dashboardActionLine(12, -1, selected, "Database management", ""),
+		dashboardActionLine(1, -1, selected, "Deploy configuration", ""),
+		dashboardActionLine(2, -1, selected, "Monitoring & logs", ""),
+		dashboardActionLine(3, -1, selected, "Websites & stack", ""),
+		dashboardActionLine(4, -1, selected, "Database & replication", ""),
+		dashboardActionLine(5, -1, selected, "Security & backups", ""),
+		dashboardActionLine(6, -1, selected, "System updates", ""),
 		dashboardActionLine(0, -1, selected, "exit", ""),
 	}
-	ui.panel("ACTIONS", strings.Join(actions, "\n"))
-	fmt.Fprintln(ui, ui.paint("38;5;244", "  ↑/↓ choose  ·  enter confirm  ·  q exit"))
+	ui.panel("ACTIONS", ui.colorActions(strings.Join(actions, "\n")))
+	fmt.Fprintln(ui, ui.paint(colorPurple, "  ↑/↓ choose")+ui.paint(colorMuted, "  ·  ")+ui.paint(colorGreen, "enter confirm")+ui.paint(colorMuted, "  ·  ")+ui.paint(colorYellow, "q exit"))
+}
+
+func (ui *terminalUI) colorActions(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "> ") {
+			lines[i] = ui.paint(colorCyan+";1", line)
+			continue
+		}
+		start := strings.IndexAny(line, "0123456789")
+		if start >= 0 {
+			end := start
+			for end < len(line) && line[end] >= '0' && line[end] <= '9' {
+				end++
+			}
+			lines[i] = line[:start] + ui.paint(colorPurple+";1", line[start:end]) + line[end:]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// logOutput gives journal output a quick visual hierarchy without changing
+// the plain-text output produced by the ops package for pipes and scripts.
+func (ui *terminalUI) logOutput(output string) {
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if line == "" {
+			fmt.Fprintln(ui)
+			continue
+		}
+		prefix, message := splitLogPrefix(line)
+		if prefix != "" {
+			fmt.Fprint(ui, ui.paint(colorPurple, prefix)+" ")
+		}
+		fmt.Fprintln(ui, ui.paint(logMessageColor(message), message))
+	}
+}
+
+func splitLogPrefix(line string) (string, string) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || len(fields[0]) < 10 || fields[0][4] != '-' || fields[0][7] != '-' {
+		return "", line
+	}
+	return fields[0], strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
+}
+
+func logMessageColor(message string) string {
+	lower := strings.ToLower(message)
+	switch {
+	case containsAny(lower, "error", "failed", "failure", "fatal", "panic", "critical", "denied"):
+		return colorRed + ";1"
+	case containsAny(lower, "warn", "timeout", "retry", "degraded"):
+		return colorYellow
+	case containsAny(lower, "started", "active", "ready", "success", "completed", "connected", "listening"):
+		return colorGreen
+	default:
+		return colorBlue
+	}
+}
+
+func containsAny(value string, terms ...string) bool {
+	for _, term := range terms {
+		if strings.Contains(value, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string) string {
@@ -204,18 +278,12 @@ func dashboardChoice(ctx context.Context, in io.Reader, reader *bufio.Reader, ui
 	}
 	ui.dashboardSelected(c, path, 1, statuses)
 	return selectMenu(reader, ui, "Select action", "1",
-		selectorChoice{Value: "1", Label: "preview plan"},
-		selectorChoice{Value: "2", Label: "apply changes"},
-		selectorChoice{Value: "3", Label: "health check"},
-		selectorChoice{Value: "4", Label: "backup and restore"},
-		selectorChoice{Value: "5", Label: "replication"},
-		selectorChoice{Value: "6", Label: "firewall"},
-		selectorChoice{Value: "7", Label: "long-term operations"},
-		selectorChoice{Value: "8", Label: "virtual hosts"},
-		selectorChoice{Value: "9", Label: "stack settings"},
-		selectorChoice{Value: "10", Label: "guided replica setup"},
-		selectorChoice{Value: "11", Label: "guardrails and backups"},
-		selectorChoice{Value: "12", Label: "database management"},
+		selectorChoice{Value: "1", Label: "deploy configuration"},
+		selectorChoice{Value: "2", Label: "monitoring and logs"},
+		selectorChoice{Value: "3", Label: "websites and stack"},
+		selectorChoice{Value: "4", Label: "database and replication"},
+		selectorChoice{Value: "5", Label: "security and backups"},
+		selectorChoice{Value: "6", Label: "system updates"},
 		selectorChoice{Value: "0", Label: "exit"},
 	)
 }
@@ -315,7 +383,7 @@ func dashboardServiceStatuses(ctx context.Context, c config.Config, path string)
 
 func (ui *terminalUI) managedServiceStatusLines(statuses []health.ServiceStatus) string {
 	if len(statuses) == 0 {
-		return ui.paint("38;5;244", "No managed services recorded")
+		return ui.paint(colorMuted, "No managed services recorded")
 	}
 	lines := make([]string, 0, len(statuses)+1)
 	up, down, changing, unknown := 0, 0, 0, 0
@@ -332,36 +400,38 @@ func (ui *terminalUI) managedServiceStatusLines(statuses []health.ServiceStatus)
 		switch status.State {
 		case health.ServiceUp:
 			up++
-			state = ui.paint("38;5;42;1", state)
+			state = ui.paint(colorGreen+";1", state)
 		case health.ServiceDown:
 			down++
-			state = ui.paint("38;5;196;1", state)
+			state = ui.paint(colorRed+";1", state)
 		case health.ServiceChanging:
 			changing++
-			state = ui.paint("38;5;214;1", state)
+			state = ui.paint(colorYellow+";1", state)
 		default:
 			unknown++
-			state = ui.paint("38;5;244", state)
+			state = ui.paint(colorMuted, state)
 		}
 		lines = append(lines, fmt.Sprintf("%s  %-8s  %s", state, status.Service.Kind, label))
 	}
 	summary := fmt.Sprintf("%d up · %d down · %d changing · %d unknown", up, down, changing, unknown)
-	lines = append(lines, ui.paint("38;5;244", summary))
+	lines = append(lines, ui.paint(colorPurple, summary))
 	return strings.Join(lines, "\n")
 }
 
 func (ui *terminalUI) status(label string, good bool) string {
 	if good {
-		return ui.paint("38;5;42;1", "● "+label)
+		return ui.paint(colorGreen+";1", "● "+label)
 	}
-	return ui.paint("38;5;214;1", "● "+label)
+	return ui.paint(colorYellow+";1", "● "+label)
 }
 
 func (ui *terminalUI) success(message string) {
-	fmt.Fprintln(ui, ui.paint("38;5;42;1", "✓ ")+message)
+	fmt.Fprintln(ui, ui.paint(colorGreen+";1", "✓ ")+message)
 }
-func (ui *terminalUI) warn(message string)  { fmt.Fprintln(ui, ui.paint("38;5;214;1", "! ")+message) }
-func (ui *terminalUI) muted(message string) { fmt.Fprintln(ui, ui.paint("38;5;244", message)) }
+func (ui *terminalUI) warn(message string) {
+	fmt.Fprintln(ui, ui.paint(colorYellow+";1", "! ")+message)
+}
+func (ui *terminalUI) muted(message string) { fmt.Fprintln(ui, ui.paint(colorMuted, message)) }
 
 func enabledLabel(enabled bool) string {
 	if enabled {
@@ -379,7 +449,7 @@ func prompt(reader *bufio.Reader, ui *terminalUI, label, fallback string) string
 			return value
 		}
 	}
-	fmt.Fprintf(ui, "%s [%s]: ", label, fallback)
+	fmt.Fprintf(ui, "%s %s: ", ui.paint(colorCyan+";1", label), ui.paint(colorPurple, "["+fallback+"]"))
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
@@ -424,9 +494,9 @@ func selectChoices(reader *bufio.Reader, ui *terminalUI, label, fallback string,
 			return value
 		}
 	}
-	fmt.Fprintf(ui, "%s [%s]\n", label, fallback)
+	fmt.Fprintf(ui, "%s %s\n", ui.paint(colorCyan+";1", label), ui.paint(colorPurple, "["+fallback+"]"))
 	for i, option := range options {
-		fmt.Fprintf(ui, "  %d  %s\n", i+1, option.Label)
+		fmt.Fprintf(ui, "  %s  %s\n", ui.paint(colorPurple+";1", strconv.Itoa(i+1)), option.Label)
 	}
 	answer, err := reader.ReadString('\n')
 	if err == io.EOF {
@@ -486,15 +556,19 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []selectorC
 	}
 	render := func() {
 		fmt.Fprint(ui, "\033[2J\033[H")
-		fmt.Fprintln(ui, ui.paint("38;5;45;1", label))
+		fmt.Fprintln(ui, ui.paint(colorCyan+";1", label))
 		for i, option := range options {
 			marker := "  "
 			if i == selected {
 				marker = "> "
 			}
-			fmt.Fprintf(ui, "%s%s\n", marker, option.Label)
+			if i == selected {
+				fmt.Fprintln(ui, ui.paint(colorCyan+";1", marker+option.Label))
+			} else {
+				fmt.Fprintf(ui, "%s%s\n", marker, option.Label)
+			}
 		}
-		fmt.Fprintln(ui, ui.paint("38;5;244", "Use ↑/↓ and Enter"))
+		fmt.Fprintln(ui, ui.paint(colorPurple, "Use ↑/↓")+ui.paint(colorMuted, " and ")+ui.paint(colorGreen, "Enter"))
 	}
 	render()
 	for {

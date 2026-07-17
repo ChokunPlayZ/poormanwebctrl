@@ -42,6 +42,35 @@ func TestLegacyTLSDefaultStillEnablesSitesWithoutAChoice(t *testing.T) {
 	}
 }
 
+func TestDNSChallengeValidation(t *testing.T) {
+	for _, dns := range []*DNSChallenge{
+		{Provider: "cloudflare", CredentialsFile: "/etc/poorman/cloudflare.ini", PropagationSeconds: 60},
+		{Provider: "route53"},
+	} {
+		c := Default()
+		c.TLS.DNS = dns
+		if err := c.Validate(); err != nil {
+			t.Fatalf("valid DNS challenge %#v: %v", dns, err)
+		}
+	}
+}
+
+func TestDNSChallengeRejectsUnsafeConfiguration(t *testing.T) {
+	for _, dns := range []*DNSChallenge{
+		{Provider: "cloudflare"},
+		{Provider: "cloudflare", CredentialsFile: "cloudflare.ini"},
+		{Provider: "route53", CredentialsFile: "/root/.aws/credentials"},
+		{Provider: "unknown"},
+		{Provider: "route53", PropagationSeconds: 3601},
+	} {
+		c := Default()
+		c.TLS.DNS = dns
+		if err := c.Validate(); err == nil {
+			t.Errorf("expected validation error for %#v", dns)
+		}
+	}
+}
+
 func TestS3BackupValidation(t *testing.T) {
 	c := Default()
 	c.Backups.RetentionDays = 30

@@ -63,6 +63,25 @@ func addTLS(pn *plan.Plan, c config.Config, p platform.Platform) {
 		for _, alias := range s.Aliases {
 			args = append(args, "-d", alias)
 		}
+		if dns := c.TLS.DNS; dns != nil {
+			authenticator := "dns-" + dns.Provider
+			args = append([]string{"run", "--authenticator", authenticator}, args...)
+			if dns.Provider == "cloudflare" {
+				args = append(args, "--dns-cloudflare-credentials", dns.CredentialsFile)
+				if dns.PropagationSeconds > 0 {
+					args = append(args, "--dns-cloudflare-propagation-seconds", fmt.Sprint(dns.PropagationSeconds))
+				}
+			}
+			if c.WebServer.Provider == "nginx" || c.WebServer.Provider == "apache" {
+				args = append(args, "--installer", c.WebServer.Provider, "--redirect")
+				pn.Add(plan.Cmd("Obtain and attach DNS-validated TLS certificate for "+s.Domain, "certbot", true, args...))
+				continue
+			}
+			args[0] = "certonly"
+			pn.Add(plan.Cmd("Obtain DNS-validated TLS certificate for "+s.Domain, "certbot", true, args...))
+			pn.Warn("Attach the issued Let's Encrypt fullchain.pem and privkey.pem to the OpenLiteSpeed HTTPS listener, then reload")
+			continue
+		}
 		if c.WebServer.Provider == "nginx" {
 			args = append([]string{"--nginx", "--redirect"}, args...)
 		} else if c.WebServer.Provider == "apache" {

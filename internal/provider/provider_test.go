@@ -195,6 +195,48 @@ func TestTLSIsPlannedOnlyForEnabledSites(t *testing.T) {
 	}
 }
 
+func TestCloudflareDNSTLSPlanUsesAuthenticatorAndInstaller(t *testing.T) {
+	c := config.Default()
+	c.TLS.DNS = &config.DNSChallenge{Provider: "cloudflare", CredentialsFile: "/etc/poorman/cloudflare.ini", PropagationSeconds: 60}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packages string
+	for _, step := range p.Steps {
+		if step.Description == "Install required packages" {
+			packages = strings.Join(step.Args, " ")
+		}
+		if step.Description != "Obtain and attach DNS-validated TLS certificate for example.com" {
+			continue
+		}
+		got := strings.Join(append([]string{step.Command}, step.Args...), " ")
+		for _, want := range []string{"certbot run", "--authenticator dns-cloudflare", "--dns-cloudflare-credentials /etc/poorman/cloudflare.ini", "--dns-cloudflare-propagation-seconds 60", "--installer nginx", "--redirect"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("DNS TLS command %q missing %q", got, want)
+			}
+		}
+	}
+	if !strings.Contains(packages, "python3-certbot-dns-cloudflare") {
+		t.Fatalf("DNS plugin package missing from %q", packages)
+	}
+}
+
+func TestRoute53DNSTLSPackageOnAlpine(t *testing.T) {
+	c := config.Default()
+	c.TLS.DNS = &config.DNSChallenge{Provider: "route53"}
+	p, err := Build(c, platform.Platform{Distro: "alpine", Family: "alpine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range p.Steps {
+		if step.Description == "Install required packages" && strings.Contains(strings.Join(step.Args, " "), "certbot-dns-route53") {
+			return
+		}
+	}
+	t.Fatal("Alpine Route 53 Certbot plugin package was not planned")
+}
+
 func TestS3BackupPlanUploadsAndPrunesIndependentCopies(t *testing.T) {
 	c := config.Default()
 	c.Backups.RetentionDays = 30

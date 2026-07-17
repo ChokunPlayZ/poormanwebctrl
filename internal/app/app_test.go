@@ -133,6 +133,9 @@ func TestTUIShowsOperationsForExistingConfig(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("long-term operations")) {
 		t.Fatal("long-term operations option not shown")
 	}
+	if !bytes.Contains(out.Bytes(), []byte("Update manager")) {
+		t.Fatal("update manager option not shown")
+	}
 }
 
 func TestUIPanelsKeepTheirRightBorderAligned(t *testing.T) {
@@ -155,6 +158,33 @@ func TestDashboardActionColumnsStayAligned(t *testing.T) {
 	second := dashboardActionLine(2, 6, 0, "apply configuration", "Firewall management")
 	if got, want := strings.Index(first, "  5"), strings.Index(second, "  6"); got != want {
 		t.Fatalf("right-column starts = %d and %d, want equal", got, want)
+	}
+}
+
+func TestLogOutputColorsTimestampAndSeverity(t *testing.T) {
+	var out bytes.Buffer
+	ui := &terminalUI{Writer: &out, ansi: true}
+	ui.logOutput("2026-07-17T12:00:00+0700 host app[1]: started successfully\n2026-07-17T12:01:00+0700 host app[1]: fatal error\n")
+
+	got := out.String()
+	if !strings.Contains(got, "\033["+colorPurple+"m2026-07-17T12:00:00+0700") {
+		t.Fatalf("timestamp was not colored: %q", got)
+	}
+	if !strings.Contains(got, "\033["+colorGreen+"mhost app[1]: started successfully") {
+		t.Fatalf("success log was not colored: %q", got)
+	}
+	if !strings.Contains(got, "\033["+colorRed+";1mhost app[1]: fatal error") {
+		t.Fatalf("error log was not colored: %q", got)
+	}
+}
+
+func TestLogOutputStaysPlainWithoutANSI(t *testing.T) {
+	var out bytes.Buffer
+	ui := &terminalUI{Writer: &out}
+	line := "2026-07-17T12:00:00+0700 host app[1]: warning"
+	ui.logOutput(line + "\n")
+	if got := strings.TrimSpace(out.String()); got != line {
+		t.Fatalf("plain log output = %q", got)
 	}
 }
 

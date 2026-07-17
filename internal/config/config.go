@@ -141,8 +141,18 @@ type WordPress struct {
 type TLS struct {
 	// Enabled is retained as the default for configurations written before TLS
 	// became a per-site setting. New configurations set Site.TLS explicitly.
-	Enabled bool   `json:"enabled,omitempty"`
-	Email   string `json:"email,omitempty"`
+	Enabled bool          `json:"enabled,omitempty"`
+	Email   string        `json:"email,omitempty"`
+	DNS     *DNSChallenge `json:"dns,omitempty"`
+}
+
+// DNSChallenge selects an unattended Certbot DNS-01 authenticator. Provider
+// credentials remain outside the poorman configuration so they can be given
+// the narrow permissions and filesystem protection required by the provider.
+type DNSChallenge struct {
+	Provider           string `json:"provider"`
+	CredentialsFile    string `json:"credentials_file,omitempty"`
+	PropagationSeconds int    `json:"propagation_seconds,omitempty"`
 }
 
 type Firewall struct {
@@ -638,6 +648,23 @@ func (c Config) Validate() error {
 	}
 	if c.AnySiteTLSEnabled() && !strings.Contains(c.TLS.Email, "@") {
 		return fmt.Errorf("TLS requires a contact email")
+	}
+	if dns := c.TLS.DNS; dns != nil {
+		switch dns.Provider {
+		case "cloudflare":
+			if !safeManagedPath(dns.CredentialsFile) {
+				return fmt.Errorf("Cloudflare DNS TLS requires an absolute credentials_file")
+			}
+		case "route53":
+			if dns.CredentialsFile != "" {
+				return fmt.Errorf("Route 53 DNS TLS uses the AWS credential chain; credentials_file is not supported")
+			}
+		default:
+			return fmt.Errorf("unsupported TLS DNS provider %q", dns.Provider)
+		}
+		if dns.PropagationSeconds < 0 || dns.PropagationSeconds > 3600 {
+			return fmt.Errorf("TLS DNS propagation_seconds must be between 1 and 3600 when set")
+		}
 	}
 	if c.Backups.Enabled {
 		if !safeManagedPath(c.Backups.Destination) {

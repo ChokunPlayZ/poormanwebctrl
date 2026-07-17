@@ -23,8 +23,8 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 		if c.Backups.Offsite != nil {
 			offsite = c.Backups.Offsite.Provider + "://" + c.Backups.Offsite.Bucket
 		}
-		ui.panel("CURRENT", fmt.Sprintf("https       %s\ncert email  %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s\nkeep local  %d days\noffsite     %s", siteTLSLabel(c), defaultValue(c.TLS.Email, "not configured"), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured"), c.Backups.EffectiveRetentionDays(), offsite))
-		ui.panel("ACTIONS", "1  certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n6  retention and offsite storage\n0  back")
+		ui.panel("CURRENT", fmt.Sprintf("https       %s\nvalidation  %s\ncert email  %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s\nkeep local  %d days\noffsite     %s", siteTLSLabel(c), tlsValidationLabel(c), defaultValue(c.TLS.Email, "not configured"), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured"), c.Backups.EffectiveRetentionDays(), offsite))
+		ui.panel("ACTIONS", "1  certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n6  retention and offsite storage\n7  certificate validation\n0  back")
 		switch selectMenu(reader, ui, "Guardrails & backups", "1",
 			selectorChoice{Value: "1", Label: "certificate email"},
 			selectorChoice{Value: "2", Label: "firewall"},
@@ -32,6 +32,7 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 			selectorChoice{Value: "4", Label: "run backup now"},
 			selectorChoice{Value: "5", Label: "backup inventory"},
 			selectorChoice{Value: "6", Label: "retention and offsite storage"},
+			selectorChoice{Value: "7", Label: "certificate validation"},
 			selectorChoice{Value: "0", Label: "back"},
 		) {
 		case "1":
@@ -98,12 +99,55 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 				continue
 			}
 			ui.success("Backup retention and offsite settings updated")
+		case "7":
+			configureTLSValidation(&c, reader, ui)
+			if err := config.Write(path, c); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			ui.success("Certificate validation updated")
 		case "0", "q", "Q":
 			return nil
 		default:
 			ui.warn("Unknown selection.")
 		}
 	}
+}
+
+func configureTLSValidation(c *config.Config, reader *bufio.Reader, ui *terminalUI) {
+	method := selectOption(reader, ui, "Let's Encrypt validation", tlsValidationDefault(*c), "http", "cloudflare", "route53")
+	switch method {
+	case "cloudflare":
+		credentials := "/etc/poorman/cloudflare.ini"
+		propagation := 0
+		if c.TLS.DNS != nil && c.TLS.DNS.Provider == "cloudflare" {
+			credentials = defaultValue(c.TLS.DNS.CredentialsFile, credentials)
+			propagation = c.TLS.DNS.PropagationSeconds
+		}
+		credentials = prompt(reader, ui, "Cloudflare credentials file", credentials)
+		seconds := prompt(reader, ui, "DNS propagation seconds (0 uses Certbot default)", strconv.Itoa(propagation))
+		propagation, _ = strconv.Atoi(seconds)
+		c.TLS.DNS = &config.DNSChallenge{Provider: "cloudflare", CredentialsFile: credentials, PropagationSeconds: propagation}
+	case "route53":
+		c.TLS.DNS = &config.DNSChallenge{Provider: "route53"}
+	default:
+		c.TLS.DNS = nil
+	}
+}
+
+func tlsValidationLabel(c config.Config) string {
+	if c.TLS.DNS == nil {
+		return "HTTP"
+	}
+	return "DNS (" + c.TLS.DNS.Provider + ")"
+}
+
+func tlsValidationDefault(c config.Config) string {
+	if c.TLS.DNS == nil {
+		return "http"
+	}
+	return c.TLS.DNS.Provider
 }
 
 func configureBackupRetention(c *config.Config, reader *bufio.Reader, ui *terminalUI) {
