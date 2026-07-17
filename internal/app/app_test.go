@@ -200,7 +200,7 @@ func TestTUIDatabaseManagerSetsACLForExistingUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n2\n1\n1\n1\nn\n0\n0\n0\n")
+	in := bytes.NewBufferString("12\n2\n3\n1\n1\n1\nn\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestTUIDatabaseManagerDeletesDatabaseAndItsACLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n3\n4\ny\n0\n0\n")
+	in := bytes.NewBufferString("12\n3\n6\ny\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestTUIDatabaseManagerDeletesDatabaseAndItsACLs(t *testing.T) {
 		t.Fatalf("permissions after delete = %#v, want ACLs for analytics removed", got.Database.Permissions)
 	}
 	var secondOut bytes.Buffer
-	secondIn := bytes.NewBufferString("12\n2\n4\ny\n0\n")
+	secondIn := bytes.NewBufferString("12\n2\n6\ny\n0\n")
 	if err := Run([]string{"tui", "-f", path}, secondIn, &secondOut, &secondOut); err != nil {
 		t.Fatal(err)
 	}
@@ -252,6 +252,61 @@ func TestTUIDatabaseManagerDeletesDatabaseAndItsACLs(t *testing.T) {
 	}
 	if got.Database == nil || len(got.Database.Databases) != 0 || got.Database.Name != "" {
 		t.Fatalf("legacy database after delete = %#v, want no database shorthand", got.Database)
+	}
+}
+
+func TestTUIDatabaseManagerRemovesTableDefinitionAndACLs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-table-remove.json")
+	c := config.Default()
+	c.Database.Databases = []config.DatabaseSpec{{
+		Name: "example", Owner: "example",
+		Tables: []config.DatabaseTable{{Name: "events", Columns: []config.DatabaseColumn{{Name: "id", Type: "BIGINT"}}}},
+	}}
+	c.Database.Permissions = []config.DatabasePermission{{User: "example", Database: "example", Table: "events", Privileges: []string{"SELECT"}}}
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n2\n1\ny\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Databases) != 1 || len(got.Database.Databases[0].Tables) != 0 {
+		t.Fatalf("database tables after remove = %#v, want none", got.Database)
+	}
+	if len(got.Database.Permissions) != 0 {
+		t.Fatalf("permissions after table remove = %#v, want table ACLs removed", got.Database.Permissions)
+	}
+	if !strings.Contains(out.String(), "live table was kept") {
+		t.Fatalf("output = %q, want live-data safety notice", out.String())
+	}
+}
+
+func TestTUIDatabaseManagerRemovesACLRule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-acl-remove.json")
+	c := config.Default()
+	c.Database.Permissions = []config.DatabasePermission{{User: "example", Database: "example", Privileges: []string{"SELECT"}}}
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n5\n1\ny\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Permissions) != 0 {
+		t.Fatalf("permissions after remove = %#v, want none", got.Database)
+	}
+	if !strings.Contains(out.String(), "live grants were kept") {
+		t.Fatalf("output = %q, want live-grant safety notice", out.String())
 	}
 }
 
@@ -274,25 +329,13 @@ func TestTUIDatabaseUserManagementCreatesUser(t *testing.T) {
 	}
 }
 
-func TestTUIDatabaseUserManagementCanCreateLocalReplicaUser(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "replica-database-user.json")
-	c := config.Default()
-	c.Database = &config.Database{
-		Provider: "postgresql",
-		Role:     "replica",
-		DataDir:  "/var/lib/postgresql/replica",
-		Replication: config.Replication{
-			PrimaryHost: "10.0.0.10",
-			PrimaryPort: 5432,
-			User:        "replicator",
-			PasswordEnv: "REPLICATION_PASSWORD",
-		},
-	}
-	if err := config.Write(path, c); err != nil {
+func TestTUIDatabaseUserManagementRemovesLegacyUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-user-remove.json")
+	if err := config.WriteDefault(path); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n1\ny\nlocal_reader\nLOCAL_READER_PASSWORD\n0\n0\n0\n")
+	in := bytes.NewBufferString("12\n3\n3\n1\ny\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -300,8 +343,69 @@ func TestTUIDatabaseUserManagementCanCreateLocalReplicaUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Database == nil || len(got.Database.Users) != 1 || got.Database.Users[0].Name != "local_reader" {
+	if got.Database == nil || got.Database.User != "" || got.Database.PasswordEnv != "" || len(got.Database.Users) != 0 {
+		t.Fatalf("database users after remove = %#v, want no legacy or explicit user", got.Database)
+	}
+	if len(got.Database.Databases) != 1 || got.Database.Databases[0].Owner != "" {
+		t.Fatalf("databases after owner removal = %#v, want materialized unowned database", got.Database.Databases)
+	}
+}
+
+func TestTUIDatabaseUserManagementCanCreateLocalReplicaUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replica-database-user.json")
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "mariadb",
+		Role:     "replica",
+		Replication: config.Replication{
+			PrimaryHost: "10.0.0.10",
+			PrimaryPort: 3306,
+			User:        "replicator",
+			PasswordEnv: "REPLICATION_PASSWORD",
+			NodeID:      2,
+		},
+	}
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n1\ny\nlocal_reader\nLOCAL_READER_PASSWORD\n\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Users) != 1 || got.Database.Users[0].Name != "local_reader" || !got.Database.Users[0].Local {
 		t.Fatalf("replica database users = %#v, want local_reader user", got.Database)
+	}
+}
+
+func TestTUIDatabaseUserManagementRejectsLocalPostgresStandbyUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "postgres-replica-database-user.json")
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "postgresql", Role: "replica", Port: 5433, DataDir: "/var/lib/postgresql/replica",
+		Replication: config.Replication{PrimaryHost: "10.0.0.10", PrimaryPort: 5432, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", Slot: "poorman_replica_1"},
+	}
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n1\n\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Users) != 0 {
+		t.Fatalf("PostgreSQL replica users = %#v, want no local user", got.Database)
+	}
+	if !strings.Contains(out.String(), "hot standbys cannot create local users") {
+		t.Fatalf("output = %q, want PostgreSQL standby explanation", out.String())
 	}
 }
 

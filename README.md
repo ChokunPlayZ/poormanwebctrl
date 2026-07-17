@@ -66,13 +66,13 @@ Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains
 
 Choose **Stack settings** to adjust the web server, database and replication role, TLS email/enabled state, firewall, and backup destination/schedule after setup.
 
-Choose **Database management** in the dashboard to add logical databases, database users, tables, and explicit permissions. The plan validates and quotes all managed identifiers. The older `database.name`, `database.user`, and `database.password_env` fields remain supported as a single-database shorthand; use `database.databases`, `database.users`, and `database.permissions` for a full chain. See [the database-chain example](examples/database-chain.json).
+Choose **Database management** in the dashboard to add logical databases, database users, tables, and explicit permissions. You can also remove database, user, table, and ACL definitions. Removal is deliberately non-destructive: it updates the desired configuration and clears dependent definitions, but does not drop live databases, tables, accounts, or existing grants. The plan validates and quotes all managed identifiers. The older `database.name`, `database.user`, and `database.password_env` fields remain supported as a single-database shorthand; use `database.databases`, `database.users`, and `database.permissions` for a full chain. See [the database-chain example](examples/database-chain.json).
 
 Choose **guardrails & backups** for the fast operational path: turn HTTPS, the firewall, or scheduled backups on or off; set the certificate email, backup destination, and cron schedule; run a backup immediately; or inspect the backup inventory.
 
 During a new guided setup, the database section asks for `standalone`, `primary`, or `replica`. Primary setup collects the replication network and credentials; replica setup collects the primary host, ports, replication credentials, and the PostgreSQL data directory or MariaDB node ID. Use `poorman replica setup` (or **guided replica setup** in the dashboard) to configure a replica on an existing stack. When `--from` points to a standalone stack, the wizard now saves both sides: it promotes the source file to `primary` with matching replication credentials and writes the independent `replica` file.
 
-Logical database objects are applied only on standalone and primary instances. Replica plans skip database/table/user/grant writes and configure replication instead, preventing accidental writes to a physical read-only replica. Manage the chain on the primary configuration and let replication carry it to replicas.
+Logical database objects are applied only on standalone and primary instances. Replica plans skip database/table/user/grant writes and configure replication instead, preventing accidental writes to a physical read-only replica. Manage the chain on the primary configuration and let replication carry it to replicas. MariaDB replicas may additionally declare an explicitly local user (`"local": true`); poorman disables binary logging for that account change. PostgreSQL hot standbys cannot create local roles, so their users must come from the primary.
 
 ## Secrets
 

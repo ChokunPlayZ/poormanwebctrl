@@ -96,20 +96,18 @@ func TestReplicaPlanSkipsDatabaseChainWrites(t *testing.T) {
 	}
 }
 
-func TestReplicaPlanCreatesExplicitLocalDatabaseUser(t *testing.T) {
+func TestMariaDBReplicaPlanCreatesExplicitLocalDatabaseUserWithoutBinaryLogging(t *testing.T) {
 	c := config.Default()
 	c.Database = &config.Database{
-		Provider: "postgresql",
+		Provider: "mariadb",
 		Role:     "replica",
-		Port:     5433,
-		DataDir:  "/var/lib/postgresql/replica",
-		Users:    []config.DatabaseUser{{Name: "local_reader", PasswordEnv: "LOCAL_READER_PASSWORD"}},
+		Users:    []config.DatabaseUser{{Name: "local_reader", PasswordEnv: "LOCAL_READER_PASSWORD", Local: true}},
 		Replication: config.Replication{
 			PrimaryHost: "10.0.0.10",
-			PrimaryPort: 5432,
+			PrimaryPort: 3306,
 			User:        "replicator",
 			PasswordEnv: "REPLICATION_PASSWORD",
-			Slot:        "catalog_replica",
+			NodeID:      2,
 		},
 	}
 	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
@@ -118,15 +116,36 @@ func TestReplicaPlanCreatesExplicitLocalDatabaseUser(t *testing.T) {
 	}
 	found := false
 	for _, step := range p.Steps {
-		if step.Description == "Create PostgreSQL database users" {
+		if step.Description == "Create MariaDB database user local_reader" {
 			found = true
-			if !strings.Contains(step.Input, "local_reader") {
+			if !strings.Contains(step.Input, "local_reader") || !strings.Contains(step.Input, "SET SESSION sql_log_bin=0") {
 				t.Fatalf("local replica user SQL = %q", step.Input)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("replica plan did not create the explicit local database user")
+		t.Fatal("MariaDB replica plan did not create the explicit local database user")
+	}
+}
+
+func TestReplicaPlanSkipsNonLocalDatabaseUsers(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "mariadb",
+		Role:     "replica",
+		Users:    []config.DatabaseUser{{Name: "replicated_reader", PasswordEnv: "READER_PASSWORD"}},
+		Replication: config.Replication{
+			PrimaryHost: "10.0.0.10", PrimaryPort: 3306, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", NodeID: 2,
+		},
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range p.Steps {
+		if strings.Contains(step.Description, "database user replicated_reader") {
+			t.Fatalf("replica plan recreated replicated user: %q", step.Description)
+		}
 	}
 }
 
@@ -171,6 +190,44 @@ func TestOpenLiteSpeedUsesOfficialRepositoryAndInclude(t *testing.T) {
 			t.Errorf("OpenLiteSpeed plan missing %q", want)
 		}
 	}
+}
+
+func TestOpenLiteSpeedDebianUsesPublishedLSPHPPackages(t *testing.T) {
+	c := config.Default()
+	c.WebServer.Provider = "openlitespeed"
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var installArgs string
+	for _, step := range p.Steps {
+		if step.Description == "Install required packages" && containsArg(step.Args, "openlitespeed") {
+			installArgs = strings.Join(step.Args, " ")
+			break
+		}
+	}
+	if installArgs == "" {
+		t.Fatal("OpenLiteSpeed package installation step not found")
+	}
+	for _, want := range []string{"openlitespeed", "lsphp84", "lsphp84-common", "lsphp84-curl", "lsphp84-mysql"} {
+		if !strings.Contains(installArgs, want) {
+			t.Errorf("OpenLiteSpeed install packages missing %q: %s", want, installArgs)
+		}
+	}
+	for _, unavailable := range []string{"lsphp84-gd", "lsphp84-mbstring", "lsphp84-xml", "lsphp84-zip"} {
+		if strings.Contains(installArgs, unavailable) {
+			t.Errorf("OpenLiteSpeed Debian install includes unavailable package %q: %s", unavailable, installArgs)
+		}
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFirewallPlansAreAvailableIndependently(t *testing.T) {

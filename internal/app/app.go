@@ -832,6 +832,10 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		d := c.Database
 		ensureDeclarativeDatabase(d)
 		users := d.ManagedUsers()
+		mutableUsers := users
+		if d.Role == "replica" {
+			mutableUsers = localDatabaseUsers(users)
+		}
 
 		ui.clear()
 		ui.brand("Database users", "Manage database accounts and their credentials")
@@ -843,7 +847,11 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		} else {
 			for _, user := range users {
 				host := defaultValue(user.Host, "localhost")
-				fmt.Fprintf(ui, "%-24s %-16s %s\n", user.Name, host, defaultValue(user.PasswordEnv, "password not configured"))
+				scope := ""
+				if user.Local {
+					scope = "  local replica account"
+				}
+				fmt.Fprintf(ui, "%-24s %-16s %s%s\n", user.Name, host, defaultValue(user.PasswordEnv, "password not configured"), scope)
 			}
 		}
 		ui.panel("ACTIONS", "1  create database user\n2  edit database user\n3  remove database user\n0  back")
@@ -856,11 +864,16 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		switch choice {
 		case "1":
 			if d.Role == "replica" {
+				if d.Provider != "mariadb" {
+					ui.warn("PostgreSQL hot standbys cannot create local users; create the user on the primary and let replication carry it.")
+					pause(reader, ui)
+					continue
+				}
 				if !yesNo(selectOption(reader, ui, "Create this database user locally on the replica?", "n", "y", "n")) {
 					continue
 				}
 			}
-			if err := createDatabaseUser(d, reader, ui); err != nil {
+			if err := createDatabaseUser(d, d.Role == "replica", reader, ui); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
 				continue
@@ -874,17 +887,12 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 				ui.success("Database user created")
 			}
 		case "2":
-			if len(users) == 0 {
-				ui.warn("No database users exist; create one first.")
+			if len(mutableUsers) == 0 {
+				ui.warn("No editable database users exist here; manage replicated users on the primary.")
 				pause(reader, ui)
 				continue
 			}
-			if d.Role == "replica" {
-				ui.warn("Replicas are read-only; edit the user on the primary.")
-				pause(reader, ui)
-				continue
-			}
-			if err := editDatabaseUser(d, users, reader, ui); err != nil {
+			if err := editDatabaseUser(d, mutableUsers, reader, ui); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
 				continue
@@ -892,19 +900,18 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 			if err := config.Write(path, c); err != nil {
 				return err
 			}
-			ui.success("Database user updated")
+			if d.Role == "replica" {
+				ui.success("Local replica user definition updated")
+			} else {
+				ui.success("Database user updated")
+			}
 		case "3":
-			if len(users) == 0 {
-				ui.warn("No database users exist; create one first.")
+			if len(mutableUsers) == 0 {
+				ui.warn("No removable database users exist here; manage replicated users on the primary.")
 				pause(reader, ui)
 				continue
 			}
-			if d.Role == "replica" {
-				ui.warn("Replicas are read-only; remove the user on the primary.")
-				pause(reader, ui)
-				continue
-			}
-			if err := removeDatabaseUser(d, users, reader, ui); err != nil {
+			if err := removeDatabaseUser(d, mutableUsers, reader, ui); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
 				continue
@@ -912,14 +919,24 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 			if err := config.Write(path, c); err != nil {
 				return err
 			}
-			ui.success("Database user removed and its permissions revoked")
+			ui.success("Database user and its ACL rules removed from configuration; the live account was kept")
 		case "0", "q", "Q":
 			return nil
 		}
 	}
 }
 
-func createDatabaseUser(d *config.Database, reader *bufio.Reader, ui *terminalUI) error {
+func localDatabaseUsers(users []config.DatabaseUser) []config.DatabaseUser {
+	local := make([]config.DatabaseUser, 0, len(users))
+	for _, user := range users {
+		if user.Local {
+			local = append(local, user)
+		}
+	}
+	return local
+}
+
+func createDatabaseUser(d *config.Database, local bool, reader *bufio.Reader, ui *terminalUI) error {
 	name := prompt(reader, ui, "New database username", "app_user")
 	for _, user := range d.ManagedUsers() {
 		if user.Name == name {
@@ -929,6 +946,7 @@ func createDatabaseUser(d *config.Database, reader *bufio.Reader, ui *terminalUI
 	user := config.DatabaseUser{
 		Name:        name,
 		PasswordEnv: prompt(reader, ui, "Password environment variable", "POORMAN_DB_PASSWORD"),
+		Local:       local,
 	}
 	if d.Provider == "mariadb" {
 		user.Host = selectOption(reader, ui, "MariaDB user host", "localhost", "localhost", "%")
@@ -970,12 +988,17 @@ func removeDatabaseUser(d *config.Database, users []config.DatabaseUser, reader 
 	if name == "0" {
 		return nil
 	}
-	for _, database := range d.ManagedDatabases() {
+	owned := 0
+	for _, database := range d.Databases {
 		if database.Owner == name {
-			return fmt.Errorf("cannot remove %q while it owns database %q", name, database.Name)
+			owned++
 		}
 	}
-	if !yesNo(selectOption(reader, ui, "Remove database user "+name+"?", "n", "y", "n")) {
+	confirmation := "Remove database user " + name + " from the configuration? The live account will be kept."
+	if owned > 0 {
+		confirmation = fmt.Sprintf("Remove database user %s and clear it as owner of %d database(s)? The live account will be kept.", name, owned)
+	}
+	if !yesNo(selectOption(reader, ui, confirmation, "n", "y", "n")) {
 		return nil
 	}
 	filtered := d.Users[:0]
@@ -985,6 +1008,19 @@ func removeDatabaseUser(d *config.Database, users []config.DatabaseUser, reader 
 		}
 	}
 	d.Users = filtered
+	for i := range d.Databases {
+		if d.Databases[i].Owner == name {
+			d.Databases[i].Owner = ""
+		}
+	}
+	if d.User == name {
+		// ensureDeclarativeDatabase has already materialized the shorthand
+		// database and user. Clear all three coupled legacy fields so the user
+		// is not synthesized again by ManagedUsers on the next reload.
+		d.Name = ""
+		d.User = ""
+		d.PasswordEnv = ""
+	}
 	d.Permissions = filterDatabasePermissionsByUser(d.Permissions, name)
 	d.ACL = filterDatabasePermissionsByUser(d.ACL, name)
 	return nil
@@ -1021,12 +1057,14 @@ func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *te
 		if c.Database.Role == "replica" {
 			ui.panel("REPLICA", "This database is read-only. Manage tables and permissions on the primary.")
 		}
-		ui.panel("ACTIONS", "1  create table\n2  set user permissions\n3  view current ACLs\n4  delete database\n0  back")
+		ui.panel("ACTIONS", "1  create table\n2  remove table definition\n3  set user permissions\n4  view current ACLs\n5  remove ACL rule\n6  delete database\n0  back")
 		choice := selectMenu(reader, ui, "Database / "+database.Name, "1",
 			selectorChoice{Value: "1", Label: "create table"},
-			selectorChoice{Value: "2", Label: "set user permissions"},
-			selectorChoice{Value: "3", Label: "view current ACLs"},
-			selectorChoice{Value: "4", Label: "delete database"},
+			selectorChoice{Value: "2", Label: "remove table definition"},
+			selectorChoice{Value: "3", Label: "set user permissions"},
+			selectorChoice{Value: "4", Label: "view current ACLs"},
+			selectorChoice{Value: "5", Label: "remove ACL rule"},
+			selectorChoice{Value: "6", Label: "delete database"},
 			selectorChoice{Value: "0", Label: "back"},
 		)
 		switch choice {
@@ -1042,6 +1080,16 @@ func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *te
 			}
 		case "2":
 			if c.Database.Role == "replica" {
+				ui.warn("Replicas are read-only; remove the table definition on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := removeTableDefinition(path, c, index, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "3":
+			if c.Database.Role == "replica" {
 				ui.warn("Replicas are read-only; set permissions on the primary.")
 				pause(reader, ui)
 				continue
@@ -1050,10 +1098,20 @@ func selectedDatabaseTUI(path, databaseName string, reader *bufio.Reader, ui *te
 				ui.warn(err.Error())
 				pause(reader, ui)
 			}
-		case "3":
+		case "4":
 			showDatabaseACL(ui, *c.Database, database.Name)
 			pause(reader, ui)
-		case "4":
+		case "5":
+			if c.Database.Role == "replica" {
+				ui.warn("Replicas are read-only; remove the ACL rule on the primary.")
+				pause(reader, ui)
+				continue
+			}
+			if err := removeDatabasePermission(path, c, database.Name, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+			}
+		case "6":
 			if c.Database.Role == "replica" {
 				ui.warn("Replicas are read-only; delete the database on the primary.")
 				pause(reader, ui)
@@ -1097,7 +1155,7 @@ func deleteDatabase(path string, c config.Config, index int, reader *bufio.Reade
 	if err := config.Write(path, c); err != nil {
 		return false, err
 	}
-	ui.success("Database deleted; its users were kept")
+	ui.success("Database removed from configuration; its users and live data were kept")
 	return true, nil
 }
 
@@ -1141,6 +1199,68 @@ func createTableForDatabase(path string, c config.Config, index int, reader *buf
 	}
 	ui.success("Table created in " + d.Databases[index].Name)
 	return nil
+}
+
+func removeTableDefinition(path string, c config.Config, index int, reader *bufio.Reader, ui *terminalUI) error {
+	d := c.Database
+	if d == nil || index < 0 || index >= len(d.Databases) {
+		return fmt.Errorf("database is not configured")
+	}
+	database := &d.Databases[index]
+	if len(database.Tables) == 0 {
+		return fmt.Errorf("database %q has no managed tables", database.Name)
+	}
+	options := make([]string, 0, len(database.Tables)+1)
+	for _, table := range database.Tables {
+		name := table.Name
+		if d.Provider == "postgresql" {
+			name = defaultValue(table.Schema, "public") + "." + table.Name
+		}
+		options = append(options, name)
+	}
+	options = append(options, "0")
+	choice := selectOption(reader, ui, "Table definition", options[0], options...)
+	if choice == "0" {
+		return nil
+	}
+	tableIndex := -1
+	for i, table := range database.Tables {
+		name := table.Name
+		if d.Provider == "postgresql" {
+			name = defaultValue(table.Schema, "public") + "." + table.Name
+		}
+		if name == choice {
+			tableIndex = i
+			break
+		}
+	}
+	if tableIndex < 0 {
+		return fmt.Errorf("table definition %q was not found", choice)
+	}
+	table := database.Tables[tableIndex]
+	if !yesNo(selectOption(reader, ui, "Remove "+choice+" from the configuration? The live table will be kept.", "n", "y", "n")) {
+		return nil
+	}
+	database.Tables = append(database.Tables[:tableIndex], database.Tables[tableIndex+1:]...)
+	d.Permissions = filterDatabasePermissionsByTable(d.Permissions, database.Name, table)
+	d.ACL = filterDatabasePermissionsByTable(d.ACL, database.Name, table)
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("Table definition and its ACL rules removed; the live table was kept")
+	return nil
+}
+
+func filterDatabasePermissionsByTable(permissions []config.DatabasePermission, database string, table config.DatabaseTable) []config.DatabasePermission {
+	filtered := permissions[:0]
+	schema := defaultValue(table.Schema, "public")
+	for _, permission := range permissions {
+		permissionSchema := defaultValue(permission.Schema, "public")
+		if permission.Database != database || permission.Table != table.Name || permissionSchema != schema {
+			filtered = append(filtered, permission)
+		}
+	}
+	return filtered
 }
 
 func setDatabasePermission(path string, c config.Config, index int, reader *bufio.Reader, ui *terminalUI) error {
@@ -1215,6 +1335,79 @@ func upsertDatabasePermission(d *config.Database, permission config.DatabasePerm
 		}
 	}
 	d.Permissions = append(d.Permissions, permission)
+}
+
+type databasePermissionRef struct {
+	acl        bool
+	index      int
+	permission config.DatabasePermission
+}
+
+func removeDatabasePermission(path string, c config.Config, database string, reader *bufio.Reader, ui *terminalUI) error {
+	d := c.Database
+	if d == nil {
+		return fmt.Errorf("database is not configured")
+	}
+	var refs []databasePermissionRef
+	for i, permission := range d.Permissions {
+		if permission.Database == database {
+			refs = append(refs, databasePermissionRef{index: i, permission: permission})
+		}
+	}
+	for i, permission := range d.ACL {
+		if permission.Database == database {
+			refs = append(refs, databasePermissionRef{acl: true, index: i, permission: permission})
+		}
+	}
+	if len(refs) == 0 {
+		return fmt.Errorf("database %q has no ACL rules", database)
+	}
+	options := make([]string, 0, len(refs)+1)
+	for i, ref := range refs {
+		options = append(options, fmt.Sprintf("%d  %s  %s  %s", i+1, ref.permission.User, databasePermissionScope(ref.permission), strings.Join(ref.permission.Privileges, ",")))
+	}
+	options = append(options, "0")
+	choice := selectOption(reader, ui, "ACL rule", options[0], options...)
+	if choice == "0" {
+		return nil
+	}
+	selected := -1
+	for i, option := range options[:len(options)-1] {
+		if option == choice {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 {
+		return fmt.Errorf("ACL rule was not found")
+	}
+	if !yesNo(selectOption(reader, ui, "Remove this ACL rule from the configuration? Existing live grants will be kept.", "n", "y", "n")) {
+		return nil
+	}
+	ref := refs[selected]
+	if ref.acl {
+		d.ACL = append(d.ACL[:ref.index], d.ACL[ref.index+1:]...)
+	} else {
+		d.Permissions = append(d.Permissions[:ref.index], d.Permissions[ref.index+1:]...)
+	}
+	if err := config.Write(path, c); err != nil {
+		return err
+	}
+	ui.success("ACL rule removed from configuration; existing live grants were kept")
+	return nil
+}
+
+func databasePermissionScope(permission config.DatabasePermission) string {
+	if permission.Table != "" {
+		if permission.Schema != "" {
+			return permission.Schema + "." + permission.Table
+		}
+		return permission.Table
+	}
+	if permission.Schema != "" {
+		return permission.Schema + ".*"
+	}
+	return "database-wide"
 }
 
 func countDatabasePermissions(d config.Database, database string) int {

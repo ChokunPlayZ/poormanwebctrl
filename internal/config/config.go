@@ -54,7 +54,8 @@ type DatabaseSpec struct {
 type DatabaseUser struct {
 	Name        string `json:"name"`
 	PasswordEnv string `json:"password_env,omitempty"`
-	Host        string `json:"host,omitempty"` // MariaDB account host; ignored by PostgreSQL.
+	Host        string `json:"host,omitempty"`  // MariaDB account host; ignored by PostgreSQL.
+	Local       bool   `json:"local,omitempty"` // Explicit account created only on a MariaDB replica.
 }
 
 type DatabaseTable struct {
@@ -413,6 +414,12 @@ func (c Config) Validate() error {
 				if net.ParseIP(user.Host) == nil && !validDomain(user.Host) {
 					return fmt.Errorf("database user %q has invalid host %q", user.Name, user.Host)
 				}
+			}
+			if user.Local && d.Role != "replica" {
+				return fmt.Errorf("database user %q can be local only on a replica", user.Name)
+			}
+			if user.Local && d.Provider != "mariadb" {
+				return fmt.Errorf("database user %q cannot be local on a PostgreSQL hot standby", user.Name)
 			}
 		}
 		for _, database := range managedDatabases {

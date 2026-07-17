@@ -252,7 +252,13 @@ func packageSet(c config.Config, p platform.Platform) []string {
 
 func phpPackages(p platform.Platform, web string, database *config.Database) []string {
 	if web == "openlitespeed" {
-		packages := []string{"lsphp84", "lsphp84-common", "lsphp84-curl", "lsphp84-gd", "lsphp84-mbstring", "lsphp84-xml", "lsphp84-zip"}
+		// LiteSpeed's Debian/Ubuntu builds bundle GD, mbstring, XML, and ZIP
+		// into lsphpXX-common; unlike the RPM repository, apt does not publish
+		// separate packages for those extensions.
+		packages := []string{"lsphp84", "lsphp84-common", "lsphp84-curl"}
+		if p.Family == "rhel" {
+			packages = append(packages, "lsphp84-gd", "lsphp84-mbstring", "lsphp84-xml", "lsphp84-zip")
+		}
 		if database != nil {
 			if database.Provider == "postgresql" {
 				packages = append(packages, "lsphp84-pgsql")
@@ -409,9 +415,9 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 		addReplication(pn, *d, p)
 	}
 	if d.Role == "replica" {
-		// Replica users are intentionally local-only. Databases, tables, and
-		// grants still come from replication, but an operator may opt a user
-		// into this replica from the TUI.
+		// MariaDB can have explicitly local accounts on a replica. PostgreSQL
+		// hot standbys cannot write role catalogs, and all ordinary accounts on
+		// either provider arrive through replication.
 		addDatabaseUsers(pn, *d)
 	}
 }
@@ -484,11 +490,17 @@ func addDatabaseObjects(pn *plan.Plan, d config.Database) {
 func addDatabaseUsers(pn *plan.Plan, d config.Database) {
 	users := d.ManagedUsers()
 	if d.Role == "replica" {
-		// ManagedUsers includes legacy application shorthand. Replica users
-		// must be explicit so local accounts are never created by accident.
-		users = append([]config.DatabaseUser(nil), d.Users...)
+		users = nil
+		for _, user := range d.Users {
+			if user.Local {
+				users = append(users, user)
+			}
+		}
 	}
 	if len(users) == 0 {
+		return
+	}
+	if d.Role == "replica" && d.Provider == "postgresql" {
 		return
 	}
 	if d.Provider == "postgresql" {
@@ -510,7 +522,13 @@ func addDatabaseUsers(pn *plan.Plan, d config.Database) {
 		if host == "" {
 			host = "localhost"
 		}
-		input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%s' IDENTIFIED BY '${%s}';\n", user.Name, host, user.PasswordEnv, user.Name, host, user.PasswordEnv)
+		input := ""
+		if d.Role == "replica" {
+			// Keep this account local even if the replica later becomes an
+			// upstream in a chained GTID topology.
+			input = "SET SESSION sql_log_bin=0;\n"
+		}
+		input += fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%s' IDENTIFIED BY '${%s}';\n", user.Name, host, user.PasswordEnv, user.Name, host, user.PasswordEnv)
 		step := plan.Cmd("Create MariaDB database user "+user.Name, "mariadb", true, mariaDBCommandArgs(d, "--batch", "--skip-column-names", "--connect-timeout=10")...)
 		step.Input, step.Sensitive, step.SQLSecrets = input, true, true
 		step.TimeoutSeconds = 60
