@@ -79,8 +79,8 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 		WebServer: config.WebServer{Provider: providerName},
 		Database:  database,
 		Access:    config.Access{Users: []config.User{{Name: owner, Home: "/home/" + owner, SFTPOnly: true}}},
-		Sites:     []config.Site{{Domain: domain, Root: root, Owner: owner, Runtime: runtimeName, WordPress: wordpress}},
-		TLS:       config.TLS{Enabled: tlsEnabled, Email: "admin@" + domain},
+		Sites:     []config.Site{{Domain: domain, Root: root, Owner: owner, Runtime: runtimeName, TLS: &tlsEnabled, WordPress: wordpress}},
+		TLS:       config.TLS{Email: "admin@" + domain},
 		Firewall:  config.Firewall{Enabled: true},
 		Backups:   config.Backup{Enabled: backupEnabled, Destination: "/var/backups/poorman", Schedule: "0 3 * * *", RetentionDays: 14},
 	}
@@ -199,9 +199,20 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	}
 	if _, statErr := os.Stat(*path); statErr == nil {
 		loadedTarget = true
-		c, err = config.Load(*path)
+		target, loadErr := config.Load(*path)
+		err = loadErr
 		if err != nil {
 			return err
+		}
+		if sourceConfig == nil {
+			c = target
+		} else if target.Database != nil && target.Database.Role == "replica" {
+			// --from defines the stack the replica belongs to. Keep only the
+			// existing replica's node-local database layout; otherwise stale
+			// copies of web, site, access, and backup settings can silently
+			// replace the source stack (for example, Apache replacing
+			// OpenLiteSpeed on a rerun).
+			c.Database = target.Database
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
@@ -510,12 +521,12 @@ func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		}
 		ui.clear()
 		ui.brand("Stack settings", "Adjust the platform after initial setup")
-		ui.panel("CURRENT", fmt.Sprintf("web       %s\ndatabase  %s\ntls       %s\nfirewall  %s\nbackups   %s", c.WebServer.Provider, databaseLabel(c), enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled)))
-		ui.panel("ACTIONS", "1  web server\n2  database and replication\n3  TLS and certificate email\n4  firewall\n5  backups\n0  back")
+		ui.panel("CURRENT", fmt.Sprintf("web         %s\ndatabase    %s\nhttps       %s\ncert email  %s\nfirewall    %s\nbackups     %s", c.WebServer.Provider, databaseLabel(c), siteTLSLabel(c), defaultValue(c.TLS.Email, "not configured"), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled)))
+		ui.panel("ACTIONS", "1  web server\n2  database and replication\n3  certificate email\n4  firewall\n5  backups\n0  back")
 		switch selectMenu(reader, ui, "Stack settings", "1",
 			selectorChoice{Value: "1", Label: "web server"},
 			selectorChoice{Value: "2", Label: "database and replication"},
-			selectorChoice{Value: "3", Label: "TLS and certificate email"},
+			selectorChoice{Value: "3", Label: "certificate email"},
 			selectorChoice{Value: "4", Label: "firewall"},
 			selectorChoice{Value: "5", Label: "backups"},
 			selectorChoice{Value: "0", Label: "back"},
@@ -529,10 +540,7 @@ func stackSettingsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 				continue
 			}
 		case "3":
-			c.TLS.Enabled = yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", enabledDefault(c.TLS.Enabled), "y", "n"))
-			if c.TLS.Enabled {
-				c.TLS.Email = prompt(reader, ui, "Certificate email", c.TLS.Email)
-			}
+			c.TLS.Email = prompt(reader, ui, "Certificate email", defaultValue(c.TLS.Email, defaultSiteEmail(c)))
 		case "4":
 			c.Firewall.Enabled = yesNo(selectOption(reader, ui, "Enable firewall?", enabledDefault(c.Firewall.Enabled), "y", "n"))
 		case "5":

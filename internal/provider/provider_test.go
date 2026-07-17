@@ -169,6 +169,32 @@ func TestWordPressPlanHasCompleteWorkflow(t *testing.T) {
 	}
 }
 
+func TestTLSIsPlannedOnlyForEnabledSites(t *testing.T) {
+	c := config.Default()
+	disabled := false
+	c.Sites = append(c.Sites, config.Site{
+		Domain: "plain.example.com",
+		Root:   "/var/www/plain.example.com",
+		TLS:    &disabled,
+	})
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundEnabled := false
+	for _, step := range p.Steps {
+		if strings.Contains(step.Description, "TLS certificate for plain.example.com") {
+			t.Fatalf("disabled site received a TLS step: %q", step.Description)
+		}
+		if step.Description == "Obtain and attach TLS certificate for example.com" {
+			foundEnabled = true
+		}
+	}
+	if !foundEnabled {
+		t.Fatal("enabled site did not receive a TLS step")
+	}
+}
+
 func TestS3BackupPlanUploadsAndPrunesIndependentCopies(t *testing.T) {
 	c := config.Default()
 	c.Backups.RetentionDays = 30
@@ -423,7 +449,7 @@ func TestSitePlanCreatesReplaceableWelcomePage(t *testing.T) {
 			if step.Path != "/var/www/example.com/index.html" || step.Owner != "webadmin" || step.Group != "www-data" || step.Mode != 0o640 {
 				t.Errorf("welcome page metadata = %#v", step)
 			}
-			if step.UnlessCommand != "test" || !slices.Equal(step.UnlessArgs, []string{"-e", step.Path}) {
+			if step.UnlessCommand != "test" || !slices.Equal(step.UnlessArgs, []string{"-e", step.Path}) || step.SkipIfNotEmpty != "/var/www/example.com" {
 				t.Errorf("welcome page is not create-only: %#v", step)
 			}
 			for _, want := range []string{"Welcome to example.com", "Poorman's Panel", tt.stack, step.Path} {

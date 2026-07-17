@@ -152,7 +152,7 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s\nsite      %s\nconfig    %s", c.WebServer.Provider, databaseLine, site, path))
 	ui.panel("MANAGED SERVICES", ui.managedServiceStatusLines(statuses))
-	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
+	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(siteTLSLabel(c), c.AnySiteTLSEnabled()), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
 	replicationAction := "replication status"
 	if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
 		replicationAction += " (not configured)"

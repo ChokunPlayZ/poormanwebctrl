@@ -87,6 +87,60 @@ func TestGuidedMariaDBReplicaPromotesAndSavesStandaloneSource(t *testing.T) {
 	}
 }
 
+func TestGuidedReplicaRerunKeepsSourceStackSettings(t *testing.T) {
+	dir := t.TempDir()
+	primaryPath := filepath.Join(dir, "poorman.json")
+	replicaPath := filepath.Join(dir, "replica.json")
+	primary := config.Default()
+	primary.WebServer.Provider = "openlitespeed"
+	primary.Sites[0].Domain = "mpowerbattery.com"
+	primary.Database.Role = "primary"
+	primary.Database.Replication = config.Replication{
+		User:        "replicator",
+		PasswordEnv: "POORMAN_REPLICATION_PASSWORD",
+		AllowedCIDR: "127.0.0.1/32",
+		NodeID:      1,
+	}
+	if err := config.Write(primaryPath, primary); err != nil {
+		t.Fatal(err)
+	}
+
+	replica := primary
+	replica.WebServer.Provider = "apache"
+	replica.Sites[0].Domain = "stale.example.com"
+	replica.Database = &config.Database{
+		Provider: "mariadb", Role: "replica", Port: 3307,
+		DataDir: "/var/lib/mysql/poorman-replica-3307",
+		Replication: config.Replication{
+			PrimaryHost: "127.0.0.1", PrimaryPort: 3306,
+			User: "replicator", PasswordEnv: "POORMAN_REPLICATION_PASSWORD", NodeID: 2,
+		},
+	}
+	if err := config.Write(replicaPath, replica); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("\n\n\ny\n\n\n\n\n\n")
+	if err := Run([]string{"replica", "setup", "-f", replicaPath, "--from", primaryPath}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	saved, err := config.Load(replicaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.WebServer.Provider != "openlitespeed" {
+		t.Fatalf("replica web provider = %q, want source provider openlitespeed", saved.WebServer.Provider)
+	}
+	if saved.Sites[0].Domain != "mpowerbattery.com" {
+		t.Fatalf("replica site = %q, want source site mpowerbattery.com", saved.Sites[0].Domain)
+	}
+	if saved.Database.Role != "replica" || saved.Database.Port != 3307 || saved.Database.DataDir != "/var/lib/mysql/poorman-replica-3307" {
+		t.Fatalf("replica database layout was not retained: %#v", saved.Database)
+	}
+}
+
 func TestGuidedMariaDBReplicaDerivesDistinctRemoteTopology(t *testing.T) {
 	dir := t.TempDir()
 	primaryPath := filepath.Join(dir, "primary.json")

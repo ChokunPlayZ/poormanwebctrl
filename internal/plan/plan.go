@@ -3,6 +3,7 @@ package plan
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -36,6 +37,7 @@ type Step struct {
 	TimeoutSeconds int
 	UnlessCommand  string
 	UnlessArgs     []string
+	SkipIfNotEmpty string
 	StatePath      string
 	StateKey       string
 	StateContent   string
@@ -157,6 +159,15 @@ func FileIfMissingOwnedBy(description, path, content, owner, group string, mode 
 	step := ManagedFileOwnedBy(description, path, content, owner, group, mode)
 	step.UnlessCommand = "test"
 	step.UnlessArgs = []string{"-e", path}
+	return step
+}
+
+// FileIfDirectoryEmptyOwnedBy creates a starter file only when its parent
+// directory has no content. Once a site has any deployed content, poorman must
+// leave the document root untouched.
+func FileIfDirectoryEmptyOwnedBy(description, path, content, owner, group string, mode uint32) Step {
+	step := FileIfMissingOwnedBy(description, path, content, owner, group, mode)
+	step.SkipIfNotEmpty = filepath.Dir(path)
 	return step
 }
 

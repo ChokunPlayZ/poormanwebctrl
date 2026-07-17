@@ -16,6 +16,7 @@
     "root": "/var/www/blog.example.com",
     "owner": "website",
     "runtime": "php",
+    "tls": true,
     "wordpress": {
       "title": "My blog",
       "admin_user": "siteadmin",
@@ -23,7 +24,7 @@
       "admin_password_env": "POORMAN_WP_ADMIN_PASSWORD"
     }
   }],
-  "tls": { "enabled": true, "email": "admin@example.com" },
+  "tls": { "email": "admin@example.com" },
   "firewall": { "enabled": true },
   "backups": {
     "enabled": true,

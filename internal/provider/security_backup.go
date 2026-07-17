@@ -52,10 +52,13 @@ func addDatabaseFirewall(pn *plan.Plan, c config.Config, p platform.Platform) {
 }
 
 func addTLS(pn *plan.Plan, c config.Config, p platform.Platform) {
-	if !c.TLS.Enabled {
+	if !c.AnySiteTLSEnabled() {
 		return
 	}
 	for _, s := range c.Sites {
+		if !c.SiteTLSEnabled(s) {
+			continue
+		}
 		args := []string{"--non-interactive", "--agree-tos", "--email", c.TLS.Email, "-d", s.Domain}
 		for _, alias := range s.Aliases {
 			args = append(args, "-d", alias)

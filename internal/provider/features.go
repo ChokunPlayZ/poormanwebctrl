@@ -226,7 +226,7 @@ func firewallPackages(c config.Config, p platform.Platform) []string {
 }
 
 func tlsPackages(c config.Config, p platform.Platform) []string {
-	if !c.TLS.Enabled {
+	if !c.AnySiteTLSEnabled() {
 		return nil
 	}
 	packages := []string{"certbot"}

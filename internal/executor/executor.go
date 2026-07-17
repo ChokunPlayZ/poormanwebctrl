@@ -290,6 +290,24 @@ func applyFile(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Wr
 }
 
 func run(ctx context.Context, s plan.Step, in io.Reader, out, errOut io.Writer) error {
+	if s.SkipIfNotEmpty != "" {
+		command := "find"
+		args := []string{s.SkipIfNotEmpty, "!", "-path", s.SkipIfNotEmpty, "-prune", "-print", "-quit"}
+		if s.NeedsRoot && os.Geteuid() != 0 {
+			args = append([]string{"-n", command}, args...)
+			command = "sudo"
+		}
+		check := exec.CommandContext(ctx, command, args...)
+		var found bytes.Buffer
+		check.Stdout, check.Stderr = &found, errOut
+		if err := check.Run(); err != nil {
+			return fmt.Errorf("inspect directory %s: %w", s.SkipIfNotEmpty, err)
+		}
+		if strings.TrimSpace(found.String()) != "" {
+			fmt.Fprintln(out, "  document root is not empty; skipped")
+			return nil
+		}
+	}
 	if s.UnlessCommand != "" {
 		checkCommand, checkArgs := s.UnlessCommand, append([]string(nil), s.UnlessArgs...)
 		if s.RunAs != "" {

@@ -116,6 +116,7 @@ type Site struct {
 	Root      string     `json:"root"`
 	Owner     string     `json:"owner,omitempty"`
 	Runtime   string     `json:"runtime,omitempty"`
+	TLS       *bool      `json:"tls,omitempty"`
 	WordPress *WordPress `json:"wordpress,omitempty"`
 }
 
@@ -127,6 +128,8 @@ type WordPress struct {
 }
 
 type TLS struct {
+	// Enabled is retained as the default for configurations written before TLS
+	// became a per-site setting. New configurations set Site.TLS explicitly.
 	Enabled bool   `json:"enabled,omitempty"`
 	Email   string `json:"email,omitempty"`
 }
@@ -249,16 +252,36 @@ func (d Database) ManagedPermissions() []DatabasePermission {
 }
 
 func Default() Config {
+	tlsEnabled := true
 	return Config{
 		Version:   1,
 		WebServer: WebServer{Provider: "nginx"},
 		Database:  &Database{Provider: "mariadb", Role: "standalone", Name: "example", User: "example", PasswordEnv: "POORMAN_DB_PASSWORD"},
 		Access:    Access{Users: []User{{Name: "webadmin", Home: "/home/webadmin", SFTPOnly: true}}},
-		Sites:     []Site{{Domain: "example.com", Root: "/var/www/example.com", Owner: "webadmin", Runtime: "php"}},
-		TLS:       TLS{Enabled: true, Email: "admin@example.com"},
+		Sites:     []Site{{Domain: "example.com", Root: "/var/www/example.com", Owner: "webadmin", Runtime: "php", TLS: &tlsEnabled}},
+		TLS:       TLS{Email: "admin@example.com"},
 		Firewall:  Firewall{Enabled: true},
 		Backups:   Backup{Enabled: true, Destination: "/var/backups/poorman", Schedule: "0 3 * * *", RetentionDays: defaultBackupRetentionDays},
 	}
+}
+
+// SiteTLSEnabled resolves the site's explicit HTTPS choice. The top-level
+// value is a compatibility default for configurations created by older
+// versions, where one switch controlled every site.
+func (c Config) SiteTLSEnabled(site Site) bool {
+	if site.TLS != nil {
+		return *site.TLS
+	}
+	return c.TLS.Enabled
+}
+
+func (c Config) AnySiteTLSEnabled() bool {
+	for _, site := range c.Sites {
+		if c.SiteTLSEnabled(site) {
+			return true
+		}
+	}
+	return false
 }
 
 func Load(path string) (Config, error) {
@@ -539,7 +562,7 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if c.TLS.Enabled && !strings.Contains(c.TLS.Email, "@") {
+	if c.AnySiteTLSEnabled() && !strings.Contains(c.TLS.Email, "@") {
 		return fmt.Errorf("TLS requires a contact email")
 	}
 	if c.Backups.Enabled {

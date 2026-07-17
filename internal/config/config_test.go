@@ -23,6 +23,25 @@ func TestDefaultIsValid(t *testing.T) {
 	}
 }
 
+func TestSiteTLSOverridesLegacyInstanceDefault(t *testing.T) {
+	c := Default()
+	c.TLS.Enabled = true
+	disabled := false
+	c.Sites[0].TLS = &disabled
+	if c.SiteTLSEnabled(c.Sites[0]) {
+		t.Fatal("explicitly disabled site inherited the legacy TLS default")
+	}
+}
+
+func TestLegacyTLSDefaultStillEnablesSitesWithoutAChoice(t *testing.T) {
+	c := Default()
+	c.TLS.Enabled = true
+	c.Sites[0].TLS = nil
+	if !c.SiteTLSEnabled(c.Sites[0]) {
+		t.Fatal("legacy instance TLS setting no longer enables its sites")
+	}
+}
+
 func TestS3BackupValidation(t *testing.T) {
 	c := Default()
 	c.Backups.RetentionDays = 30

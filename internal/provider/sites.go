@@ -38,7 +38,7 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 		pn.Add(plan.DirOwnedBy("Create document root for "+s.Domain, s.Root, owner, runtimeGroup, 0o750))
 		if s.WordPress == nil {
 			indexPath := filepath.Join(s.Root, "index.html")
-			pn.Add(plan.FileIfMissingOwnedBy("Create welcome page for "+s.Domain, indexPath, welcomePage(c.WebServer.Provider, s, indexPath), owner, runtimeGroup, 0o640))
+			pn.Add(plan.FileIfDirectoryEmptyOwnedBy("Create welcome page for "+s.Domain, indexPath, welcomePage(c.WebServer.Provider, s, indexPath), owner, runtimeGroup, 0o640))
 		}
 		path, content := siteConfig(c.WebServer.Provider, s, p)
 		pn.Add(plan.ManagedFile("Configure virtual host "+s.Domain, path, content, "root", 0o644))
@@ -52,7 +52,7 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 			}
 			wp := s.WordPress
 			scheme := "http"
-			if c.TLS.Enabled {
+			if c.SiteTLSEnabled(s) {
 				scheme = "https"
 			}
 			step := plan.AsUser("Install WordPress for "+s.Domain, owner, "wp", "core", "install", "--path="+s.Root, "--url="+scheme+"://"+s.Domain, "--title="+defaultString(wp.Title, s.Domain), "--admin_user="+defaultString(wp.AdminUser, "admin"), "--admin_email="+wp.AdminEmail, "--prompt=admin_password")

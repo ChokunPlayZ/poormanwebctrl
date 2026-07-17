@@ -13,7 +13,7 @@
 - Linux users, SSH keys, and SFTP-only groups
 - Explicit opt-in vsftpd support (SFTP is the safe default)
 - WordPress download, configuration, and installation with wp-cli
-- Let's Encrypt certificates for Nginx and Apache
+- Per-domain Let's Encrypt certificates for Nginx and Apache
 - UFW/firewalld rules, including CIDR-scoped database replication
 - Scheduled site/database backups and on-demand backups, with configurable local retention
 - Optional offsite S3 copies with separate retention, AWS profiles/regions, and S3-compatible endpoints
@@ -65,15 +65,15 @@ Each successful apply records poorman-managed services in `/var/lib/poorman/mana
 
 After the first apply, poorman is authoritative for every configuration file it records in that inventory. Every apply rewrites all current managed virtual hosts, removes obsolete managed vhost files after a site removal or web-server switch, and restores explicit service-appropriate ownership. Manual edits to poorman-managed configuration files are intentionally overwritten. The server login MOTD states this policy.
 
-Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains. Every host is planned independently, including its document root, aliases, runtime, WordPress setup, and managed server configuration.
+Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains. Every host is planned independently, including its document root, aliases, runtime, HTTPS choice, WordPress setup, and managed server configuration. The edit screen lists every editable setting and its current value; move to one and press Enter to change only that setting.
 
 A virtual host owner may be declared under `access.users` or may be an existing system account. Poorman creates and configures declared access users; for an undeclared owner, it verifies that the account exists during apply and otherwise leaves the account untouched.
 
-Choose **Stack settings** to adjust the web server, database and replication role, TLS email/enabled state, firewall, and backup destination/schedule after setup.
+Choose **Stack settings** to adjust the web server, database and replication role, certificate email, firewall, and backup destination/schedule after setup. HTTPS is enabled or disabled independently in each virtual host's settings.
 
 Choose **Database management** in the dashboard to add logical databases, database users, tables, and explicit permissions. You can also remove database, user, table, and ACL definitions. Removal is deliberately non-destructive: it updates the desired configuration and clears dependent definitions, but does not drop live databases, tables, accounts, or existing grants. The plan validates and quotes all managed identifiers. The older `database.name`, `database.user`, and `database.password_env` fields remain supported as a single-database shorthand; use `database.databases`, `database.users`, and `database.permissions` for a full chain. See [the database-chain example](examples/database-chain.json).
 
-Choose **guardrails & backups** for the fast operational path: turn HTTPS, the firewall, or scheduled backups on or off; set the certificate email, backup destination, and cron schedule; run a backup immediately; or inspect the backup inventory.
+Choose **guardrails & backups** for the fast operational path: review per-domain HTTPS coverage, turn the firewall or scheduled backups on or off, set the shared certificate contact email, configure the backup destination and cron schedule, run a backup immediately, or inspect the backup inventory.
 
 ### Backup retention and S3
 

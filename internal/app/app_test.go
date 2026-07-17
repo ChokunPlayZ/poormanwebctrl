@@ -186,7 +186,7 @@ func TestTUIManagesMultipleVirtualHosts(t *testing.T) {
 	if err := config.WriteDefault(path); err != nil {
 		t.Fatal(err)
 	}
-	in := bytes.NewBufferString("8\n1\nshop.example.com\n\n\nstatic\n\n0\n0\n")
+	in := bytes.NewBufferString("8\n1\nshop.example.com\ny\n\n\nstatic\n\n0\n0\n")
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
@@ -696,7 +696,7 @@ func TestTUIAdjustsStackSettings(t *testing.T) {
 	if err := config.WriteDefault(path); err != nil {
 		t.Fatal(err)
 	}
-	in := bytes.NewBufferString("9\n3\nn\n0\n0\n")
+	in := bytes.NewBufferString("8\n2\n1\n6\nn\n7\n0\n0\n")
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
@@ -705,8 +705,13 @@ func TestTUIAdjustsStackSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.TLS.Enabled {
-		t.Fatal("TLS remained enabled after stack settings update")
+	if c.SiteTLSEnabled(c.Sites[0]) {
+		t.Fatal("TLS remained enabled for the edited domain")
+	}
+	for _, want := range []string{"domain      example.com", "root        /var/www/example.com", "owner       webadmin", "runtime     php", "aliases     none", "https       enabled"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("edit menu missing current value %q", want)
+		}
 	}
 }
 

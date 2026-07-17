@@ -92,6 +92,46 @@ func TestFileIfMissingPreservesReplacement(t *testing.T) {
 	}
 }
 
+func TestSkipIfNotEmptyAllowsFirstStarterOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.html")
+	step := plan.Step{Description: "starter", Kind: plan.Command, Command: "touch", Args: []string{path}, SkipIfNotEmpty: dir}
+	var out bytes.Buffer
+	if err := Apply(t.Context(), plan.Plan{Steps: []plan.Step{step}}, nil, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("starter was not created: %v", err)
+	}
+	out.Reset()
+	if err := Apply(t.Context(), plan.Plan{Steps: []plan.Step{step}}, nil, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("document root is not empty; skipped")) {
+		t.Fatalf("missing non-empty skip message: %q", out.String())
+	}
+}
+
+func TestSkipIfNotEmptyLeavesExistingContentAlone(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "app.php")
+	if err := os.WriteFile(existing, []byte("application\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "index.html")
+	step := plan.Step{Description: "starter", Kind: plan.Command, Command: "touch", Args: []string{path}, SkipIfNotEmpty: dir}
+	var out bytes.Buffer
+	if err := Apply(t.Context(), plan.Plan{Steps: []plan.Step{step}}, nil, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("starter file was created in populated directory: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("document root is not empty; skipped")) {
+		t.Fatalf("missing non-empty skip message: %q", out.String())
+	}
+}
+
 func TestReconcileManagedStateRemovesObsoleteOwnedFiles(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "managed.json")

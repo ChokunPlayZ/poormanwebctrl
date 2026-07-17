@@ -23,10 +23,10 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 		if c.Backups.Offsite != nil {
 			offsite = c.Backups.Offsite.Provider + "://" + c.Backups.Offsite.Bucket
 		}
-		ui.panel("CURRENT", fmt.Sprintf("https       %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s\nkeep local  %d days\noffsite     %s", enabledLabel(c.TLS.Enabled), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured"), c.Backups.EffectiveRetentionDays(), offsite))
-		ui.panel("ACTIONS", "1  HTTPS and certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n6  retention and offsite storage\n0  back")
+		ui.panel("CURRENT", fmt.Sprintf("https       %s\ncert email  %s\nfirewall    %s\nbackups     %s\nbackup path %s\nschedule    %s\nkeep local  %d days\noffsite     %s", siteTLSLabel(c), defaultValue(c.TLS.Email, "not configured"), enabledLabel(c.Firewall.Enabled), enabledLabel(c.Backups.Enabled), defaultValue(c.Backups.Destination, "not configured"), defaultValue(c.Backups.Schedule, "not configured"), c.Backups.EffectiveRetentionDays(), offsite))
+		ui.panel("ACTIONS", "1  certificate email\n2  firewall\n3  backups and schedule\n4  run backup now\n5  backup inventory\n6  retention and offsite storage\n0  back")
 		switch selectMenu(reader, ui, "Guardrails & backups", "1",
-			selectorChoice{Value: "1", Label: "HTTPS and certificate email"},
+			selectorChoice{Value: "1", Label: "certificate email"},
 			selectorChoice{Value: "2", Label: "firewall"},
 			selectorChoice{Value: "3", Label: "backups and schedule"},
 			selectorChoice{Value: "4", Label: "run backup now"},
@@ -35,16 +35,13 @@ func protectionTUI(ctx context.Context, path string, reader *bufio.Reader, ui *t
 			selectorChoice{Value: "0", Label: "back"},
 		) {
 		case "1":
-			c.TLS.Enabled = yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", enabledDefault(c.TLS.Enabled), "y", "n"))
-			if c.TLS.Enabled {
-				c.TLS.Email = prompt(reader, ui, "Certificate email", defaultValue(c.TLS.Email, defaultSiteEmail(c)))
-			}
+			c.TLS.Email = prompt(reader, ui, "Certificate email", defaultValue(c.TLS.Email, defaultSiteEmail(c)))
 			if err := config.Write(path, c); err != nil {
 				ui.warn(err.Error())
 				pause(reader, ui)
 				continue
 			}
-			ui.success("HTTPS settings updated")
+			ui.success("Certificate email updated")
 		case "2":
 			c.Firewall.Enabled = yesNo(selectOption(reader, ui, "Enable firewall?", enabledDefault(c.Firewall.Enabled), "y", "n"))
 			if err := config.Write(path, c); err != nil {
@@ -216,7 +213,7 @@ func vhostsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 				if len(site.Aliases) > 0 {
 					aliases = "  aliases: " + strings.Join(site.Aliases, ", ")
 				}
-				fmt.Fprintf(ui, "%d  %-30s %-6s %s%s\n", i+1, site.Domain, defaultValue(site.Runtime, "static"), site.Root, aliases)
+				fmt.Fprintf(ui, "%d  %-30s %-6s https: %-8s %s%s\n", i+1, site.Domain, defaultValue(site.Runtime, "static"), enabledLabel(c.SiteTLSEnabled(site)), site.Root, aliases)
 			}
 		}
 		ui.panel("ACTIONS", "1  add virtual host\n2  edit virtual host\n3  remove virtual host\n0  back")
@@ -251,13 +248,18 @@ func vhostsTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 
 func addVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
 	domain := prompt(reader, ui, "Domain", "example.com")
+	tlsEnabled := yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", "y", "y", "n"))
 	site := config.Site{
 		Domain:  domain,
 		Root:    prompt(reader, ui, "Document root", "/var/www/"+domain),
 		Owner:   prompt(reader, ui, "System/SFTP user", firstUser(c)),
 		Runtime: selectOption(reader, ui, "Runtime", "static", "static", "php"),
+		TLS:     &tlsEnabled,
 	}
 	site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", ""))
+	if tlsEnabled && c.TLS.Email == "" {
+		c.TLS.Email = prompt(reader, ui, "Certificate email", "admin@"+domain)
+	}
 	c.Sites = append(c.Sites, site)
 	if err := config.Write(path, c); err != nil {
 		return err
@@ -275,17 +277,46 @@ func editVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalU
 		return nil
 	}
 	site := c.Sites[i]
-	site.Domain = prompt(reader, ui, "Domain", site.Domain)
-	site.Root = prompt(reader, ui, "Document root", site.Root)
-	site.Owner = prompt(reader, ui, "System/SFTP user", site.Owner)
-	site.Runtime = selectOption(reader, ui, "Runtime", defaultValue(site.Runtime, "static"), "static", "php")
-	site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", strings.Join(site.Aliases, ",")))
-	c.Sites[i] = site
-	if err := config.Write(path, c); err != nil {
-		return err
+	for {
+		ui.clear()
+		ui.brand("Edit virtual host", site.Domain)
+		choice := selectMenu(reader, ui, "Choose a setting to edit", "domain",
+			selectorChoice{Value: "domain", Label: fmt.Sprintf("domain      %s", site.Domain)},
+			selectorChoice{Value: "root", Label: fmt.Sprintf("root        %s", site.Root)},
+			selectorChoice{Value: "owner", Label: fmt.Sprintf("owner       %s", defaultValue(site.Owner, "web-server default"))},
+			selectorChoice{Value: "runtime", Label: fmt.Sprintf("runtime     %s", defaultValue(site.Runtime, "static"))},
+			selectorChoice{Value: "aliases", Label: fmt.Sprintf("aliases     %s", defaultValue(strings.Join(site.Aliases, ", "), "none"))},
+			selectorChoice{Value: "https", Label: fmt.Sprintf("https       %s", enabledLabel(c.SiteTLSEnabled(site)))},
+			selectorChoice{Value: "0", Label: "back"},
+		)
+		switch choice {
+		case "domain":
+			site.Domain = prompt(reader, ui, "Domain", site.Domain)
+		case "root":
+			site.Root = prompt(reader, ui, "Document root", site.Root)
+		case "owner":
+			site.Owner = prompt(reader, ui, "System/SFTP user", site.Owner)
+		case "runtime":
+			site.Runtime = selectOption(reader, ui, "Runtime", defaultValue(site.Runtime, "static"), "static", "php")
+		case "aliases":
+			site.Aliases = parseAliases(prompt(reader, ui, "Aliases (comma-separated)", strings.Join(site.Aliases, ",")))
+		case "https":
+			tlsEnabled := yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", enabledDefault(c.SiteTLSEnabled(site)), "y", "n"))
+			site.TLS = &tlsEnabled
+			if tlsEnabled && c.TLS.Email == "" {
+				c.TLS.Email = prompt(reader, ui, "Certificate email", "admin@"+site.Domain)
+			}
+		case "0", "q", "Q":
+			return nil
+		default:
+			continue
+		}
+		c.Sites[i] = site
+		if err := config.Write(path, c); err != nil {
+			return err
+		}
+		ui.success("Updated virtual host " + site.Domain)
 	}
-	ui.success("Updated virtual host " + site.Domain)
-	return nil
 }
 
 func removeVHost(path string, c config.Config, reader *bufio.Reader, ui *terminalUI) error {
@@ -342,6 +373,16 @@ func defaultValue(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func siteTLSLabel(c config.Config) string {
+	enabled := 0
+	for _, site := range c.Sites {
+		if c.SiteTLSEnabled(site) {
+			enabled++
+		}
+	}
+	return fmt.Sprintf("%d/%d domains enabled", enabled, len(c.Sites))
 }
 
 func parseAliases(value string) []string {
