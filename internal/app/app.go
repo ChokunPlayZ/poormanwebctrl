@@ -1892,7 +1892,11 @@ func prompt(reader *bufio.Reader, out io.Writer, label, fallback string) string 
 func selectOption(reader *bufio.Reader, ui *terminalUI, label, fallback string, options ...string) string {
 	choices := make([]selectorChoice, 0, len(options))
 	for _, option := range options {
-		choices = append(choices, selectorChoice{Value: option, Label: option})
+		choiceLabel := option
+		if option == "0" {
+			choiceLabel = "back"
+		}
+		choices = append(choices, selectorChoice{Value: option, Label: choiceLabel})
 	}
 	return selectChoices(reader, ui, label, fallback, choices...)
 }
