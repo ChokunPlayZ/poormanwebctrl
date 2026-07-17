@@ -1712,12 +1712,13 @@ func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string
 
 func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
 	file, ok := in.(*os.File)
-	if !ok || !isTerminal(file) || !rawTerminalAvailable(file) {
-		ui.dashboard(c, path)
-		return selectOption(reader, ui, "Select action", "1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "0")
+	if ok && isTerminal(file) && rawTerminalAvailable(file) {
+		if choice, rawOK := rawDashboardChoice(file, ui, c, path); rawOK {
+			return choice
+		}
 	}
-
-	return rawDashboardChoice(file, ui, c, path)
+	ui.dashboard(c, path)
+	return selectOption(reader, ui, "Select action", "1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "0")
 }
 
 func rawTerminalAvailable(file *os.File) bool {
@@ -1731,12 +1732,12 @@ func isTerminal(file *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path string) string {
+func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path string) (string, bool) {
 	getState := exec.Command("stty", "-g")
 	getState.Stdin = file
 	state, err := getState.Output()
 	if err != nil {
-		return "0"
+		return "", false
 	}
 	defer func() {
 		restore := exec.Command("stty", strings.TrimSpace(string(state)))
@@ -1746,7 +1747,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	raw := exec.Command("stty", "-icanon", "-echo", "min", "0", "time", "1")
 	raw.Stdin = file
 	if err := raw.Run(); err != nil {
-		return "0"
+		return "", false
 	}
 
 	selected := 1
@@ -1756,27 +1757,27 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	for {
 		b, ok := readRawByte(file)
 		if !ok {
-			return "0"
+			return "", false
 		}
 		switch b {
 		case '\r', '\n':
 			if typed != "" {
-				return typed
+				return typed, true
 			}
-			return strconv.Itoa(selected)
+			return strconv.Itoa(selected), true
 		case 'q', 'Q':
-			return "q"
+			return "q", true
 		case 0x1b:
 			prefix, ok := readRawMaybeByte(file)
 			if !ok {
-				return "0"
+				return "0", true
 			}
 			if prefix != '[' {
-				return "0"
+				return "0", true
 			}
 			code, ok := readRawMaybeByte(file)
 			if !ok {
-				return "0"
+				return "0", true
 			}
 			switch code {
 			case 'A':
@@ -1850,7 +1851,10 @@ func selectOption(reader *bufio.Reader, ui *terminalUI, label, fallback string, 
 	for i, option := range options {
 		fmt.Fprintf(ui, "  %d  %s\n", i+1, option)
 	}
-	answer, _ := reader.ReadString('\n')
+	answer, err := reader.ReadString('\n')
+	if err == io.EOF {
+		return escapeOption(fallback, options)
+	}
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
 		return fallback
