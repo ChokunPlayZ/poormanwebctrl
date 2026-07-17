@@ -500,6 +500,143 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 	}
 }
 
+func deploymentTUI(ctx context.Context, path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		ui.clear()
+		ui.brand("Deploy configuration", "Review the desired changes before applying them")
+		ui.panel("ACTIONS", "1  preview plan\n2  apply configuration\n0  back")
+		switch selectMenu(reader, ui, "Deploy configuration", "1",
+			selectorChoice{Value: "1", Label: "preview plan"},
+			selectorChoice{Value: "2", Label: "apply configuration"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
+		case "1":
+			if err := planCommand([]string{"-f", path}, ui); err != nil {
+				ui.warn("Plan unavailable: " + err.Error())
+			}
+			pause(reader, ui)
+		case "2":
+			if err := applyCommand(ctx, []string{"-f", path}, reader, ui, ui); err != nil {
+				ui.warn("Apply failed: " + err.Error())
+			}
+			pause(reader, ui)
+		case "0", "q", "Q":
+			return nil
+		}
+	}
+}
+
+func websitesTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		ui.clear()
+		ui.brand("Websites & stack", "Manage sites and the web server that serves them")
+		ui.panel("CURRENT", fmt.Sprintf("web server  %s\nsites       %d", c.WebServer.Provider, len(c.Sites)))
+		ui.panel("ACTIONS", "1  virtual hosts\n2  web server\n0  back")
+		switch selectMenu(reader, ui, "Websites & stack", "1",
+			selectorChoice{Value: "1", Label: "virtual hosts"},
+			selectorChoice{Value: "2", Label: "web server"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
+		case "1":
+			if err := vhostsTUI(path, reader, ui); err != nil {
+				return err
+			}
+		case "2":
+			c.WebServer.Provider = selectOption(reader, ui, "Web server", c.WebServer.Provider, "nginx", "apache", "openlitespeed")
+			if err := config.Write(path, c); err != nil {
+				return err
+			}
+			ui.success("Web server updated")
+		case "0", "q", "Q":
+			return nil
+		}
+	}
+}
+
+func databaseTUI(ctx context.Context, path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		c, err := config.Load(path)
+		if err != nil {
+			return err
+		}
+		replicationAction := "replication status"
+		if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
+			replicationAction += " (not configured)"
+		}
+		ui.clear()
+		ui.brand("Database & replication", "Configure data services, schemas, and replicas")
+		ui.panel("CURRENT", "database  "+databaseLabel(c))
+		ui.panel("ACTIONS", "1  database engine & replication settings\n2  databases, users & permissions\n3  "+replicationAction+"\n4  guided local replica setup\n0  back")
+		switch selectMenu(reader, ui, "Database & replication", "1",
+			selectorChoice{Value: "1", Label: "database engine and replication settings"},
+			selectorChoice{Value: "2", Label: "databases, users and permissions"},
+			selectorChoice{Value: "3", Label: replicationAction},
+			selectorChoice{Value: "4", Label: "guided local replica setup"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
+		case "1":
+			if err := adjustDatabase(&c, reader, ui); err != nil {
+				ui.warn(err.Error())
+				pause(reader, ui)
+				continue
+			}
+			if err := config.Write(path, c); err != nil {
+				return err
+			}
+			ui.success("Database settings updated")
+		case "2":
+			if err := databaseManagementTUI(path, reader, ui); err != nil {
+				return err
+			}
+		case "3":
+			if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
+				ui.warn("Replication is not configured. Configure it in this menu first.")
+				pause(reader, ui)
+				continue
+			}
+			if err := replicaCommand(ctx, []string{"status", "-f", path}, reader, ui, ui); err != nil {
+				ui.warn("Replication status unavailable: " + err.Error())
+			}
+			pause(reader, ui)
+		case "4":
+			if err := guidedReplicaSetupTUI(ctx, path, reader, ui); err != nil {
+				ui.warn("Replica setup unavailable: " + err.Error())
+				pause(reader, ui)
+			}
+		case "0", "q", "Q":
+			return nil
+		}
+	}
+}
+
+func securityTUI(ctx context.Context, path string, reader *bufio.Reader, ui *terminalUI) error {
+	for {
+		ui.clear()
+		ui.brand("Security & backups", "Configure protections and operate recovery controls")
+		ui.panel("ACTIONS", "1  HTTPS, firewall & backups\n2  firewall status & policy\n0  back")
+		switch selectMenu(reader, ui, "Security & backups", "1",
+			selectorChoice{Value: "1", Label: "HTTPS, firewall and backups"},
+			selectorChoice{Value: "2", Label: "firewall status and policy"},
+			selectorChoice{Value: "0", Label: "back"},
+		) {
+		case "1":
+			if err := protectionTUI(ctx, path, reader, ui); err != nil {
+				return err
+			}
+		case "2":
+			if err := firewallTUI(ctx, path, reader, ui); err != nil {
+				return err
+			}
+		case "0", "q", "Q":
+			return nil
+		}
+	}
+}
+
 func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) error {
 	previousConfirm := ui.confirmSetupCancel
 	ui.confirmSetupCancel = true

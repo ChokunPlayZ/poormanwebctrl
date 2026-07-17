@@ -19,7 +19,7 @@
 - Optional offsite S3 copies with separate retention, AWS profiles/regions, and S3-compatible endpoints
 - Local service, configuration, and virtual-host health checks
 - TUI firewall management: status, policy preview/apply, and guarded disable
-- TUI long-term operations: host resource stats, service logs, and backup inventory
+- TUI monitoring: service health, host resource stats, and service logs
 - TUI update manager: review available OS package updates and apply only selected packages
 - TUI guardrails and recovery: enable HTTPS, firewall, and backups; edit backup settings; run backups; and inspect backup artifacts
 
@@ -61,27 +61,25 @@ poorman replica setup -f REPLICA_FILE --from PRIMARY_FILE
                                       configure a replica on another host
 ```
 
-When a configuration already exists, `poorman tui` opens the operations dashboard. Choose **long-term operations** for read-only host capacity, recent systemd journal logs for configured services, and the files currently present in the configured backup destination.
+When a configuration already exists, `poorman tui` opens a dashboard grouped by purpose: **Deploy configuration**, **Monitoring & logs**, **Websites & stack**, **Database & replication**, **Security & backups**, and **System updates**. Choose **Monitoring & logs** for read-only service health, host capacity, and recent systemd journal entries for configured services.
 
-Choose **Update manager** to inspect the distribution package manager's current update list, select individual packages (or all of them), review the exact package command, and confirm before applying. Checking is read-only and uses the host's existing package metadata; refresh that metadata with the distribution's normal tools when needed.
+Choose **System updates** to inspect the distribution package manager's current update list, select individual packages (or all of them), review the exact package command, and confirm before applying. Checking is read-only and uses the host's existing package metadata; refresh that metadata with the distribution's normal tools when needed.
 
 Each successful apply records poorman-managed services in `/var/lib/poorman/managed.json`. This lets the dashboard show the primary and local replica from one configuration, as well as database instances from remote-host configurations, and lets a later apply retire an old managed replica service when its port, data directory, or provider changes. Existing data directories are retained.
 
 After the first apply, poorman is authoritative for every configuration file it records in that inventory. Every apply rewrites all current managed virtual hosts, removes obsolete managed vhost files after a site removal or web-server switch, and restores explicit service-appropriate ownership. Manual edits to poorman-managed configuration files are intentionally overwritten. The server login MOTD states this policy.
 
-Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains. Every host is planned independently, including its document root, aliases, runtime, HTTPS choice, WordPress setup, and managed server configuration. The edit screen lists every editable setting and its current value; move to one and press Enter to change only that setting.
+Choose **Websites & stack** to select the web server or list, add, edit, and remove virtual hosts. Every host is planned independently, including its document root, aliases, runtime, HTTPS choice, WordPress setup, and managed server configuration. The edit screen lists every editable setting and its current value; move to one and press Enter to change only that setting.
 
 A virtual host owner may be declared under `access.users` or may be an existing system account. Poorman creates and configures declared access users; for an undeclared owner, it verifies that the account exists during apply and otherwise leaves the account untouched.
 
-Choose **Stack settings** to adjust the web server, database and replication role, certificate email, firewall, and backup destination/schedule after setup. HTTPS is enabled or disabled independently in each virtual host's settings.
+Choose **Database & replication** to adjust the database engine and replication role, check replication status, run the guided local-replica setup, or manage logical databases, users, tables, and explicit permissions. You can also remove database, user, table, and ACL definitions. Removal is deliberately non-destructive: it updates the desired configuration and clears dependent definitions, but does not drop live databases, tables, accounts, or existing grants. The plan validates and quotes all managed identifiers. The older `database.name`, `database.user`, and `database.password_env` fields remain supported as a single-database shorthand; use `database.databases`, `database.users`, and `database.permissions` for a full chain. See [the database-chain example](examples/database-chain.json).
 
-Choose **Database management** in the dashboard to add logical databases, database users, tables, and explicit permissions. You can also remove database, user, table, and ACL definitions. Removal is deliberately non-destructive: it updates the desired configuration and clears dependent definitions, but does not drop live databases, tables, accounts, or existing grants. The plan validates and quotes all managed identifiers. The older `database.name`, `database.user`, and `database.password_env` fields remain supported as a single-database shorthand; use `database.databases`, `database.users`, and `database.permissions` for a full chain. See [the database-chain example](examples/database-chain.json).
-
-Choose **guardrails & backups** for the fast operational path: review per-domain HTTPS coverage, turn the firewall or scheduled backups on or off, set the shared certificate contact email, configure the backup destination and cron schedule, run a backup immediately, or inspect the backup inventory.
+Choose **Security & backups** for the protection and recovery path: review per-domain HTTPS coverage, turn the firewall or scheduled backups on or off, inspect and apply firewall policy, set the shared certificate contact email, configure the backup destination and cron schedule, run a backup immediately, or inspect the backup inventory.
 
 ### DNS-validated certificates
 
-Set `tls.dns` (or choose **certificate validation** under **guardrails & backups**) when port 80 cannot receive the Let's Encrypt challenge. Cloudflare and Route 53 are supported and renew automatically through Certbot's official DNS plugins. DNS validation also provides the foundation for wildcard certificates, although virtual-host aliases currently remain ordinary hostnames.
+Set `tls.dns` (or choose **certificate validation** under **Security & backups**) when port 80 cannot receive the Let's Encrypt challenge. Cloudflare and Route 53 are supported and renew automatically through Certbot's official DNS plugins. DNS validation also provides the foundation for wildcard certificates, although virtual-host aliases currently remain ordinary hostnames.
 
 Cloudflare uses an API-token file that already exists on the target server. Poorman stores only its path. Restrict the token to `Zone:DNS:Edit` for the required zones and protect the file with mode `0600`:
 
@@ -122,7 +120,7 @@ The generated job uploads a completed run before applying either retention polic
 
 Poorman installs the distribution's AWS CLI package and uses its normal credential chain; it never writes access keys into the configuration or backup script. Prefer an instance role. Because scheduled backups run as root, a named `profile` must be available to root, and environment credentials must be provided to the scheduled job's environment. The S3 identity needs `s3:PutObject`, `s3:ListBucket`, and `s3:DeleteObject` for the configured bucket/prefix. `endpoint` is optional for S3-compatible storage.
 
-During a new guided setup, the database section asks for `standalone`, `primary`, or `replica`. Use `poorman replica setup -f poorman.json` (or **guided replica setup** in the dashboard) to add a same-host replica to an existing stack. The wizard promotes a standalone database to `primary` and writes the replica's port, data directory, and node identity into `database.local_replica` in that same file. For a replica on another host, use `--from`; the remote host keeps its own configuration because it has a separate apply target.
+During a new guided setup, the database section asks for `standalone`, `primary`, or `replica`. Use `poorman replica setup -f poorman.json` (or **guided local replica setup** under **Database & replication**) to add a same-host replica to an existing stack. The wizard promotes a standalone database to `primary` and writes the replica's port, data directory, and node identity into `database.local_replica` in that same file. For a replica on another host, use `--from`; the remote host keeps its own configuration because it has a separate apply target.
 
 Logical database objects are applied only on standalone and primary instances. Replica plans skip database/table/user/grant writes and configure replication instead, preventing accidental writes to a physical read-only replica. Manage the chain on the primary configuration and let replication carry it to replicas. MariaDB replicas may additionally declare an explicitly local user (`"local": true`); poorman disables binary logging for that account change. PostgreSQL hot standbys cannot create local roles, so their users must come from the primary.
 

@@ -22,27 +22,29 @@ func operationsTUI(ctx context.Context, c config.Config, path string, reader *bu
 	services := configuredServicesFor(c, path)
 	for {
 		ui.clear()
-		ui.brand("Long-term operations", "Inspect the host and keep services healthy")
+		ui.brand("Monitoring & logs", "Inspect service health and host activity")
 		ui.panel("READ-ONLY", "These views do not change server state")
-		backupAction := "backup inventory"
-		if !c.Backups.Enabled {
-			backupAction += " (disabled)"
-		}
-		ui.panel("ACTIONS", "1  host resource stats\n2  recent service logs\n3  "+backupAction+"\n0  back")
-		switch selectMenu(reader, ui, "Long-term operations", "1",
-			selectorChoice{Value: "1", Label: "host resource stats"},
-			selectorChoice{Value: "2", Label: "recent service logs"},
-			selectorChoice{Value: "3", Label: backupAction},
+		ui.panel("ACTIONS", "1  service health\n2  host resource stats\n3  recent service logs\n0  back")
+		switch selectMenu(reader, ui, "Monitoring & logs", "1",
+			selectorChoice{Value: "1", Label: "service health"},
+			selectorChoice{Value: "2", Label: "host resource stats"},
+			selectorChoice{Value: "3", Label: "recent service logs"},
 			selectorChoice{Value: "0", Label: "back"},
 		) {
 		case "1":
+			ui.clear()
+			if err := statusCommand(ctx, []string{"-f", path}, ui); err != nil {
+				ui.warn("Health warning: " + err.Error())
+			}
+			pause(reader, ui)
+		case "2":
 			ui.clear()
 			ui.brand("Host resource stats", "A point-in-time view of capacity and service failures")
 			if err := ops.Stats(ctx, ui); err != nil {
 				ui.warn(err.Error())
 			}
 			pause(reader, ui)
-		case "2":
+		case "3":
 			ui.clear()
 			ui.brand("Service logs", "Recent entries from the system journal")
 			for i, service := range services {
@@ -71,19 +73,6 @@ func operationsTUI(ctx context.Context, c config.Config, path string, reader *bu
 				ui.warn(err.Error())
 			} else {
 				ui.logOutput(logs.String())
-			}
-			pause(reader, ui)
-		case "3":
-			ui.clear()
-			ui.brand("Backup inventory", "Review artifacts produced by the configured backup job")
-			if !c.Backups.Enabled {
-				ui.warn("Backups are disabled in Stack settings.")
-				pause(reader, ui)
-				continue
-			}
-			ui.muted("Destination: " + c.Backups.Destination)
-			if err := ops.BackupFiles(ctx, c.Backups.Destination, ui); err != nil {
-				ui.warn(err.Error())
 			}
 			pause(reader, ui)
 		case "0", "q", "Q":
@@ -271,7 +260,7 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 			}
 		case "2":
 			if !c.Firewall.Enabled {
-				ui.warn("Firewall policy is disabled in Stack settings.")
+				ui.warn("Firewall policy is disabled. Enable it under Security & backups first.")
 				continue
 			}
 			operation, err := provider.Firewall(c, p)
@@ -281,7 +270,7 @@ func firewallTUI(ctx context.Context, path string, in io.Reader, ui *terminalUI)
 			operation.Print(ui)
 		case "3":
 			if !c.Firewall.Enabled {
-				ui.warn("Firewall policy is disabled in Stack settings.")
+				ui.warn("Firewall policy is disabled. Enable it under Security & backups first.")
 				continue
 			}
 			operation, err := provider.Firewall(c, p)

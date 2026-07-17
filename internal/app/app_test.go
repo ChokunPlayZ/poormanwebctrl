@@ -127,14 +127,14 @@ func TestTUIShowsOperationsForExistingConfig(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("poorman operations")) {
 		t.Fatal("operations screen not shown")
 	}
-	if !bytes.Contains(out.Bytes(), []byte("Firewall management")) {
-		t.Fatal("firewall management option not shown")
+	if !bytes.Contains(out.Bytes(), []byte("Security & backups")) {
+		t.Fatal("security and backups menu not shown")
 	}
-	if !bytes.Contains(out.Bytes(), []byte("long-term operations")) {
-		t.Fatal("long-term operations option not shown")
+	if !bytes.Contains(out.Bytes(), []byte("Monitoring & logs")) {
+		t.Fatal("monitoring and logs menu not shown")
 	}
-	if !bytes.Contains(out.Bytes(), []byte("Update manager")) {
-		t.Fatal("update manager option not shown")
+	if !bytes.Contains(out.Bytes(), []byte("System updates")) {
+		t.Fatal("system updates menu not shown")
 	}
 }
 
@@ -198,7 +198,7 @@ func TestTUIEnablesBackupsFromGuardrailsMenu(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("11\n3\ny\n\n\n0\n0\n")
+	in := bytes.NewBufferString("5\n1\n3\ny\n\n\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestTUIManagesMultipleVirtualHosts(t *testing.T) {
 	if err := config.WriteDefault(path); err != nil {
 		t.Fatal(err)
 	}
-	in := bytes.NewBufferString("8\n1\nshop.example.com\ny\n\n\nstatic\n\n0\n0\n")
+	in := bytes.NewBufferString("3\n1\n1\nshop.example.com\ny\n\n\nstatic\n\n0\n0\n0\n")
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestTUICreatesDatabaseChainObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n1\nanalytics\n\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n1\nanalytics\n\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestTUIDatabaseManagerCreatesTableForSelectedDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n1\nitems\nid:BIGINT\nid\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n2\n1\nitems\nid:BIGINT\nid\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestTUIDatabaseManagerSetsACLForExistingUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n3\n1\n1\n1\nn\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n2\n3\n1\n1\n1\nn\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestTUIDatabaseManagerDeletesDatabaseAndItsACLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n3\n6\ny\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n3\n6\ny\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestTUIDatabaseManagerDeletesDatabaseAndItsACLs(t *testing.T) {
 		t.Fatalf("permissions after delete = %#v, want ACLs for analytics removed", got.Database.Permissions)
 	}
 	var secondOut bytes.Buffer
-	secondIn := bytes.NewBufferString("12\n2\n6\ny\n0\n")
+	secondIn := bytes.NewBufferString("4\n2\n2\n6\ny\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, secondIn, &secondOut, &secondOut); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestTUIDatabaseManagerRemovesTableDefinitionAndACLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n2\n1\ny\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n2\n2\n1\ny\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestTUIDatabaseManagerRemovesACLRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n5\n1\ny\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n2\n5\n1\ny\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestTUIDatabaseUserManagementCreatesUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n3\n1\nreader\nPOORMAN_READER_PASSWORD\n\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n3\n1\nreader\nPOORMAN_READER_PASSWORD\n\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestTUIDatabaseUserManagementRemovesLegacyUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n3\n3\n1\ny\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n3\n3\n1\ny\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestTUIDatabaseUserManagementCanCreateLocalReplicaUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n1\ny\nlocal_reader\nLOCAL_READER_PASSWORD\n\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n2\n1\ny\nlocal_reader\nLOCAL_READER_PASSWORD\n\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestTUIDatabaseUserManagementRejectsLocalPostgresStandbyUser(t *testing.T) 
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	in := bytes.NewBufferString("12\n2\n1\n\n0\n0\n0\n")
+	in := bytes.NewBufferString("4\n2\n2\n1\n\n0\n0\n0\n0\n")
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestTUIReplicaSetupKeepsDashboardInputFlow(t *testing.T) {
 	if err := config.Write(primaryPath, primary); err != nil {
 		t.Fatal(err)
 	}
-	input := "10\n\n\n\n\n\nn\nn\n0\n"
+	input := "4\n4\n\n\n\n\n\nn\nn\n0\n0\n"
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
 		t.Fatal(err)
@@ -727,7 +727,7 @@ func TestTUIAdjustsStackSettings(t *testing.T) {
 	if err := config.WriteDefault(path); err != nil {
 		t.Fatal(err)
 	}
-	in := bytes.NewBufferString("8\n2\n1\n6\nn\n7\n0\n0\n")
+	in := bytes.NewBufferString("3\n1\n2\n1\n6\nn\n7\n0\n0\n0\n")
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
@@ -806,7 +806,7 @@ func TestStackSettingsPreservesAdvancedDatabaseValues(t *testing.T) {
 	if err := config.Write(path, c); err != nil {
 		t.Fatal(err)
 	}
-	in := bytes.NewBufferString("9\n2\n\n\n\n\n\n0\n0\n")
+	in := bytes.NewBufferString("4\n1\n\n\n\n\n\n0\n0\n")
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
 		t.Fatal(err)
@@ -828,7 +828,7 @@ func TestDashboardDoesNotRunDisabledBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := Run([]string{"tui", "-f", path}, bytes.NewBufferString("4\n\n0\n"), &out, &out); err != nil {
+	if err := Run([]string{"tui", "-f", path}, bytes.NewBufferString("5\n1\n4\n\n0\n0\n0\n"), &out, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(out.Bytes(), []byte("Backups are disabled")) {
@@ -914,7 +914,7 @@ func TestDashboardKeepsLocalReplicaSetupErrorVisible(t *testing.T) {
 	if err := config.WriteDefault(primaryPath); err != nil {
 		t.Fatal(err)
 	}
-	input := "10\nbad user\n\n\n\n\n\n\n0\n"
+	input := "4\n4\nbad user\n\n\n\n\n\n\n0\n0\n"
 	var out bytes.Buffer
 	if err := Run([]string{"tui", "-f", primaryPath}, bytes.NewBufferString(input), &out, &out); err != nil {
 		t.Fatal(err)
