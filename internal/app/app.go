@@ -37,58 +37,7 @@ func Run(args []string, in io.Reader, out, errOut io.Writer) error {
 }
 
 func RunContext(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
-	if len(args) == 0 {
-		usage(out)
-		return nil
-	}
-	switch args[0] {
-	case "init":
-		return initCommand(args[1:], out)
-	case "plan":
-		return planCommand(args[1:], out)
-	case "apply":
-		return applyCommand(ctx, args[1:], in, out, errOut)
-	case "tui":
-		return tuiCommand(ctx, args[1:], in, out)
-	case "status":
-		return statusCommand(ctx, args[1:], out)
-	case "replica":
-		return replicaCommand(ctx, args[1:], in, out, errOut)
-	case "backup":
-		return backupCommand(ctx, args[1:], in, out, errOut)
-	case "version", "--version", "-v":
-		if len(args) > 1 {
-			return fmt.Errorf("unexpected argument %q", args[1])
-		}
-		fmt.Fprintln(out, version)
-		return nil
-	case "help", "--help", "-h":
-		if len(args) > 1 {
-			return fmt.Errorf("unexpected argument %q", args[1])
-		}
-		usage(out)
-		return nil
-	default:
-		return fmt.Errorf("unknown command %q", args[0])
-	}
-}
-
-func usage(w io.Writer) {
-	fmt.Fprintln(w, `poorman makes a server match a small, auditable configuration.
-
-Usage:
-  poorman init [-f poorman.json]
-  poorman plan [-f poorman.json]
-  poorman apply [-f poorman.json] [--yes]
-  poorman tui [-f poorman.json]
-  poorman status [-f poorman.json]
-  poorman replica setup [-f replica.json] [--from primary.json]
-  poorman replica status [-f poorman.json]
-  poorman replica promote [-f poorman.json] [--yes]
-  poorman backup [-f poorman.json] [--yes]
-  poorman version
-
-Start with "poorman init", edit the file, then preview with "poorman plan".`)
+	return RunWithCommands(ctx, args, in, out, errOut, BuiltInCommands())
 }
 
 func statusCommand(ctx context.Context, args []string, out io.Writer) error {

@@ -12,14 +12,15 @@ import (
 )
 
 type Config struct {
-	Version   int       `json:"version"`
-	WebServer WebServer `json:"web_server"`
-	Database  *Database `json:"database,omitempty"`
-	Access    Access    `json:"access,omitempty"`
-	Sites     []Site    `json:"sites,omitempty"`
-	TLS       TLS       `json:"tls,omitempty"`
-	Firewall  Firewall  `json:"firewall,omitempty"`
-	Backups   Backup    `json:"backups,omitempty"`
+	Version    int                        `json:"version"`
+	WebServer  WebServer                  `json:"web_server"`
+	Database   *Database                  `json:"database,omitempty"`
+	Access     Access                     `json:"access,omitempty"`
+	Sites      []Site                     `json:"sites,omitempty"`
+	TLS        TLS                        `json:"tls,omitempty"`
+	Firewall   Firewall                   `json:"firewall,omitempty"`
+	Backups    Backup                     `json:"backups,omitempty"`
+	Extensions map[string]json.RawMessage `json:"extensions,omitempty"`
 }
 
 type WebServer struct {
@@ -156,15 +157,16 @@ type OffsiteBackup struct {
 }
 
 var (
-	nameRE        = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-	sqlTypeRE     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(?:[[:space:]]*\([[:space:]]*[0-9]+(?:[[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*\))?(?:[[:space:]]+[A-Za-z][A-Za-z0-9_]*(?:[[:space:]]*\([[:space:]]*[0-9]+(?:[[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*\))?){0,3}$`)
-	defaultExprRE = regexp.MustCompile(`^[A-Za-z0-9_()' +*/:.,-]+$`)
-	charsetRE     = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-	domainRE      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
-	envRE         = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	s3BucketRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
-	s3PrefixRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$`)
-	awsOptionRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	nameRE         = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	sqlTypeRE      = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(?:[[:space:]]*\([[:space:]]*[0-9]+(?:[[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*\))?(?:[[:space:]]+[A-Za-z][A-Za-z0-9_]*(?:[[:space:]]*\([[:space:]]*[0-9]+(?:[[:space:]]*,[[:space:]]*[0-9]+)*[[:space:]]*\))?){0,3}$`)
+	defaultExprRE  = regexp.MustCompile(`^[A-Za-z0-9_()' +*/:.,-]+$`)
+	charsetRE      = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	domainRE       = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+	envRE          = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	s3BucketRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	s3PrefixRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$`)
+	awsOptionRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	extensionKeyRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 )
 
 const defaultBackupRetentionDays = 14
@@ -277,6 +279,11 @@ func Load(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	for name := range c.Extensions {
+		if !extensionKeyRE.MatchString(name) {
+			return fmt.Errorf("invalid extension name %q", name)
+		}
 	}
 	switch c.WebServer.Provider {
 	case "nginx", "apache", "openlitespeed":

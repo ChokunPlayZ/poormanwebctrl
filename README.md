@@ -137,3 +137,12 @@ PostgreSQL still requires the precise `pg_hba.conf` rule printed in the plan. Th
 - Plain FTP is rejected unless `allow_plaintext` is explicitly enabled.
 
 The design and remaining production-hardening work are in [docs/architecture.md](docs/architecture.md).
+
+## Extending poorman
+
+Commands and provisioning features are registered instead of hard-coded in a
+central router. A feature keeps its platform checks, package requirements, and
+plan contribution together; optional feature-specific JSON belongs under the
+top-level `extensions` object. See the
+[extension points](docs/architecture.md#extension-points) for the supported
+workflow and code ownership map.

@@ -69,6 +69,29 @@ func TestAppendOwnershipArgsSupportsDifferentOwnerAndGroup(t *testing.T) {
 	}
 }
 
+func TestFileIfMissingPreservesReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.html")
+	if err := os.WriteFile(path, []byte("user replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	step := plan.FileIfMissingOwnedBy("starter", path, "welcome\n", "", "", 0o600)
+	step.NeedsRoot = false
+	var out bytes.Buffer
+	if err := Apply(t.Context(), plan.Plan{Steps: []plan.Step{step}}, nil, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "user replacement\n" {
+		t.Fatalf("replacement was overwritten: %q", content)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("already satisfied; skipped")) {
+		t.Fatalf("missing skip message: %q", out.String())
+	}
+}
+
 func TestReconcileManagedStateRemovesObsoleteOwnedFiles(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "managed.json")

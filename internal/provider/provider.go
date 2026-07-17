@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net"
 	"path/filepath"
 	"sort"
@@ -20,26 +21,38 @@ const managedServerMessage = "This Webserver is managed via poorman CLI, any cha
 const managedConfigHeader = "# Managed by poorman CLI. Changes made outside Poorman WILL BE OVERWRITTEN.\n"
 
 func Build(c config.Config, p platform.Platform) (plan.Plan, error) {
-	return build(c, p, "")
+	return BuildWithFeatures(c, p, BuiltInFeatures())
+}
+
+// BuildWithFeatures builds a plan from an explicit feature pipeline. The
+// feature order is the plan order, so dependencies remain visible and easy to
+// review.
+func BuildWithFeatures(c config.Config, p platform.Platform, features []Feature) (plan.Plan, error) {
+	return build(c, p, "", features)
 }
 
 // BuildForConfig adds the host-local managed-service reconciliation around the
 // normal desired-state plan. The legacy Build entry point remains useful for
 // callers that only need a plan and do not want to persist host inventory.
 func BuildForConfig(c config.Config, p platform.Platform, configPath string) (plan.Plan, error) {
-	return build(c, p, configPath)
+	return BuildForConfigWithFeatures(c, p, configPath, BuiltInFeatures())
 }
 
-func build(c config.Config, p platform.Platform, configPath string) (plan.Plan, error) {
-	if c.WebServer.Provider == "openlitespeed" && p.Family == "alpine" {
-		return plan.Plan{}, fmt.Errorf("OpenLiteSpeed supports Debian/Ubuntu and RHEL-family packages, not Alpine")
-	}
-	if c.Database != nil && isManagedMariaDBInstance(*c.Database) && p.Family == "alpine" {
-		return plan.Plan{}, fmt.Errorf("same-machine MariaDB replicas require systemd; Alpine/OpenRC is not supported yet")
+// BuildForConfigWithFeatures adds managed-service reconciliation to a custom
+// feature pipeline.
+func BuildForConfigWithFeatures(c config.Config, p platform.Platform, configPath string, features []Feature) (plan.Plan, error) {
+	return build(c, p, configPath, features)
+}
+
+func build(c config.Config, p platform.Platform, configPath string, features []Feature) (plan.Plan, error) {
+	if err := validateFeatures(c, p, features); err != nil {
+		return plan.Plan{}, err
 	}
 	result := plan.Plan{Platform: p.Distro}
-	packages := packageSet(c, p)
-	addPackageSteps(&result, p, packages)
+	packages := packageSetForFeatures(c, p, features)
+	if len(packages) > 0 {
+		addPackageSteps(&result, p, packages)
+	}
 	addManagedMOTD(&result, p)
 	if configPath != "" {
 		services := desiredManagedServices(c, p, configPath)
@@ -54,16 +67,11 @@ func build(c config.Config, p platform.Platform, configPath string) (plan.Plan, 
 		}
 		result.Add(plan.ReconcileManagedStateWithManager("Reconcile poorman-managed services", managed.StatePath, configPath, string(content), manager))
 	}
-	if c.WebServer.Provider == "openlitespeed" {
-		addOpenLiteSpeedInstall(&result, c, p)
+	for _, feature := range features {
+		if err := feature.Plan(&result, c, p); err != nil {
+			return plan.Plan{}, fmt.Errorf("feature %s: %w", feature.Name(), err)
+		}
 	}
-	addUsers(&result, c, p)
-	addDatabase(&result, c, p)
-	addSites(&result, c, p)
-	addFTP(&result, c, p)
-	addFirewall(&result, c, p)
-	addTLS(&result, c, p)
-	addBackups(&result, c, p)
 	if configPath != "" {
 		services := desiredManagedServices(c, p, configPath)
 		content, err := json.Marshal(services)
@@ -234,88 +242,6 @@ func PromoteReplica(c config.Config, p platform.Platform) (plan.Plan, error) {
 	}
 	result.Warn("Promotion is not automatic failover: fence the old primary first, redirect clients, verify writes, and update database.role in the config")
 	return result, nil
-}
-
-func packageSet(c config.Config, p platform.Platform) []string {
-	set := map[string]bool{}
-	web := c.WebServer.Provider
-	if web == "apache" {
-		if p.Family == "debian" {
-			web = "apache2"
-		} else {
-			web = "httpd"
-		}
-	}
-	if web == "openlitespeed" {
-		set["wget"] = true
-	} else {
-		set[web] = true
-	}
-	for _, s := range c.Sites {
-		if s.Runtime == "php" || s.WordPress != nil {
-			if c.WebServer.Provider == "openlitespeed" {
-				continue
-			}
-			for _, pkg := range phpPackages(p, c.WebServer.Provider, c.Database) {
-				set[pkg] = true
-			}
-		}
-	}
-	if c.Database != nil {
-		for _, pkg := range databasePackages(*c.Database, p) {
-			set[pkg] = true
-		}
-	}
-	if c.Access.FTP.Enabled {
-		set["vsftpd"] = true
-	}
-	if c.TLS.Enabled {
-		set["certbot"] = true
-		if c.WebServer.Provider == "nginx" {
-			if p.Family == "alpine" {
-				set["certbot-nginx"] = true
-			} else {
-				set["python3-certbot-nginx"] = true
-			}
-		} else if c.WebServer.Provider == "apache" {
-			if p.Family == "alpine" {
-				set["certbot-apache"] = true
-			} else {
-				set["python3-certbot-apache"] = true
-			}
-		}
-	}
-	if c.Firewall.Enabled {
-		if p.Family == "debian" {
-			set["ufw"] = true
-		} else if p.Family == "rhel" {
-			set["firewalld"] = true
-		}
-	}
-	if c.Backups.Enabled {
-		set["rsync"] = true
-		if c.Backups.Offsite != nil && c.Backups.Offsite.Provider == "s3" {
-			switch p.Family {
-			case "alpine":
-				set["aws-cli"] = true
-			case "rhel":
-				set["awscli2"] = true
-			default:
-				set["awscli"] = true
-			}
-		}
-	}
-	writableWordPress := anyWordPress(c) && wordpressInitializationAllowed(c)
-	if writableWordPress {
-		set["curl"] = true
-		set["tar"] = true
-	}
-	items := make([]string, 0, len(set))
-	for item := range set {
-		items = append(items, item)
-	}
-	sort.Strings(items)
-	return items
 }
 
 func phpPackages(p platform.Platform, web string, database *config.Database) []string {
@@ -965,6 +891,10 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 			owner, _ = webRuntimeIdentity(c.WebServer.Provider, p)
 		}
 		pn.Add(plan.DirOwnedBy("Create document root for "+s.Domain, s.Root, owner, runtimeGroup, 0o750))
+		if s.WordPress == nil {
+			indexPath := filepath.Join(s.Root, "index.html")
+			pn.Add(plan.FileIfMissingOwnedBy("Create welcome page for "+s.Domain, indexPath, welcomePage(c.WebServer.Provider, s, indexPath), owner, runtimeGroup, 0o640))
+		}
 		path, content := siteConfig(c.WebServer.Provider, s, p)
 		pn.Add(plan.ManagedFile("Configure virtual host "+s.Domain, path, content, "root", 0o644))
 		if s.WordPress != nil && writableWordPress {
@@ -1008,6 +938,32 @@ func addSites(pn *plan.Plan, c config.Config, p platform.Platform) {
 			pn.Add(enableService(p, phpService))
 		}
 	}
+}
+
+func welcomePage(web string, site config.Site, indexPath string) string {
+	runtime := "static HTML"
+	if site.Runtime == "php" || site.WordPress != nil {
+		runtime = "PHP"
+	}
+	stack := web + " + " + runtime
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to %s</title>
+  <style>
+    body { max-width: 42rem; margin: 10vh auto; padding: 2rem; font: 18px/1.6 system-ui, sans-serif; color: #222; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Welcome to %s</h1>
+  <p>this website is setup using Poorman's Panel<br>with %s</p>
+  <p>to replace this page, replace the index file in<br><code>%s</code></p>
+</body>
+</html>
+`, html.EscapeString(site.Domain), html.EscapeString(site.Domain), html.EscapeString(stack), html.EscapeString(indexPath))
 }
 
 func openLiteSpeedRuntimeIdentity(p platform.Platform) (string, string) {

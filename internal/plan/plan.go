@@ -150,6 +150,16 @@ func ManagedFileOwnedBy(description, path, content, owner, group string, mode ui
 	return Step{Description: description, Kind: File, Path: path, Content: content, Owner: owner, Group: group, Mode: mode, NeedsRoot: true}
 }
 
+// FileIfMissingOwnedBy creates an initial file without taking ownership of its
+// contents on later applies. It is useful for starter files that users are
+// expected to replace.
+func FileIfMissingOwnedBy(description, path, content, owner, group string, mode uint32) Step {
+	step := ManagedFileOwnedBy(description, path, content, owner, group, mode)
+	step.UnlessCommand = "test"
+	step.UnlessArgs = []string{"-e", path}
+	return step
+}
+
 func EnsureLine(description, path, line string) Step {
 	return EnsureLineOwnedBy(description, path, line, "root", "root", 0o600)
 }

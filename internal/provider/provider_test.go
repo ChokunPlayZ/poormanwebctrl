@@ -374,6 +374,60 @@ func TestWebRootOwnershipUsesDeploymentOwnerAndRuntimeGroup(t *testing.T) {
 	}
 }
 
+func TestSitePlanCreatesReplaceableWelcomePage(t *testing.T) {
+	for _, tt := range []struct {
+		web, runtime, stack string
+	}{
+		{web: "nginx", runtime: "static", stack: "nginx + static HTML"},
+		{web: "apache", runtime: "php", stack: "apache + PHP"},
+	} {
+		c := config.Default()
+		c.WebServer.Provider = tt.web
+		c.Sites[0].Runtime = tt.runtime
+		p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, step := range p.Steps {
+			if step.Description != "Create welcome page for example.com" {
+				continue
+			}
+			found = true
+			if step.Path != "/var/www/example.com/index.html" || step.Owner != "webadmin" || step.Group != "www-data" || step.Mode != 0o640 {
+				t.Errorf("welcome page metadata = %#v", step)
+			}
+			if step.UnlessCommand != "test" || !slices.Equal(step.UnlessArgs, []string{"-e", step.Path}) {
+				t.Errorf("welcome page is not create-only: %#v", step)
+			}
+			for _, want := range []string{"Welcome to example.com", "Poorman's Panel", tt.stack, step.Path} {
+				if !strings.Contains(step.Content, want) {
+					t.Errorf("welcome page missing %q:\n%s", want, step.Content)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s/%s welcome page step missing", tt.web, tt.runtime)
+		}
+	}
+}
+
+func TestWordPressSiteDoesNotCreateWelcomePage(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{Provider: "mariadb", Name: "website", User: "website", PasswordEnv: "POORMAN_DB_PASSWORD"}
+	c.Sites[0].Runtime = "php"
+	c.Sites[0].WordPress = &config.WordPress{AdminEmail: "admin@example.com", AdminPassEnv: "POORMAN_WP_ADMIN_PASSWORD"}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range p.Steps {
+		if step.Description == "Create welcome page for example.com" {
+			t.Fatal("WordPress site received a welcome page that could mask index.php")
+		}
+	}
+}
+
 func TestManagedWebFilesCoverEveryVhostAndProviderSwitch(t *testing.T) {
 	c := config.Default()
 	c.Sites = append(c.Sites, config.Site{Domain: "shop.example.com", Root: "/var/www/shop.example.com", Owner: "webadmin", Runtime: "php"})

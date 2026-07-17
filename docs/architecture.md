@@ -29,6 +29,13 @@ Plans follow dependency order:
 7. Apply firewalls and certificates.
 8. Install backup jobs, enforce local retention, and optionally copy/prune timestamped runs in S3.
 
+The order is implemented as a feature pipeline in
+`internal/provider/features.go`. Each feature owns its platform validation,
+required packages, and plan contribution. The orchestrator deduplicates and
+sorts packages before asking features to contribute steps in dependency order.
+Adding a provisioning feature therefore does not require extending a central
+build switch or package list.
+
 Database management is a declarative subgraph inside step 3. A database
 instance can contain multiple logical databases, users, tables/columns, and
 explicit permissions. Identifiers are validated before planning and quoted in
@@ -55,6 +62,55 @@ PostgreSQL `pg_hba.conf` placement is version/package dependent and authenticati
 Same-host MariaDB replicas on systemd distributions are separate service instances. The replica has an isolated data directory, configuration, runtime socket/PID directory, log, TCP port, seed snapshot, and backup job. Its unit is ordered after the primary during boot but deliberately has no hard service dependency, allowing either database process to fail without systemd stopping the other. This protects against a database-process failure, not a shared host, disk, kernel, or power failure.
 
 Promotion writes the independent instance's read-only setting to `OFF` and targets its private socket. After the inventory role changes to `primary`, subsequent plans continue managing the same data directory, port, socket, service, and instance-specific backup rather than falling back to the distribution's default MariaDB service.
+
+## Extension points
+
+Top-level commands are registered in `internal/app/commands.go`. A command owns
+its name, aliases, usage text, and handler. `RunWithCommands` accepts an
+explicit registry, so alternate builds can add or remove commands without
+changing the router; help output is generated from that same registry.
+
+Provisioning features implement `provider.Feature`, or use
+`provider.FeatureFunc`. Start with `provider.BuiltInFeatures`, insert the new
+feature at its dependency boundary, and call `BuildWithFeatures` or
+`BuildForConfigWithFeatures`. Feature names must be unique. Each feature should:
+
+1. validate its platform and settings in `Validate`;
+2. return its OS packages from `Packages`;
+3. add auditable, structured steps in `Plan`;
+4. include tests proving it can be added and removed independently.
+
+Feature-specific settings can live under the top-level JSON `extensions`
+object. `config.SetExtension`, `DecodeExtension`, and `RemoveExtension` keep
+those schemas out of the core configuration type. Extension keys use lowercase
+letters, numbers, underscores, and dashes. A feature remains responsible for
+validating its decoded value before planning actions.
+
+```json
+{
+  "extensions": {
+    "metrics-agent": {
+      "endpoint": "https://metrics.example.com",
+      "interval": 30
+    }
+  }
+}
+```
+
+Features generate `plan.Step` values and never execute commands directly. This
+retains previewability, redaction, cancellation, and idempotency behavior for
+new functionality.
+
+## Code ownership map
+
+- `internal/app/commands.go`: top-level CLI registration and help generation.
+- `internal/app/app.go`: command workflows and the guided terminal experience.
+- `internal/config`: persisted schema, core validation, and extension settings.
+- `internal/provider/features.go`: feature composition and package aggregation.
+- `internal/provider/provider.go`: built-in provider step implementations.
+- `internal/plan`: executor-independent desired operations.
+- `internal/executor`: the only layer that performs planned mutations.
+- `internal/health` and `internal/ops`: read-only operational inspection.
 
 ## What “feature complete v1” means
 
