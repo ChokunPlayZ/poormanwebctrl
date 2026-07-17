@@ -81,7 +81,6 @@ func TestReplicaPlanSkipsDatabaseChainWrites(t *testing.T) {
 		Role:        "replica",
 		Port:        5433,
 		DataDir:     "/var/lib/postgresql/replica",
-		Users:       []config.DatabaseUser{{Name: "reader", PasswordEnv: "READER_PASSWORD"}},
 		Databases:   []config.DatabaseSpec{{Name: "catalog", Tables: []config.DatabaseTable{{Name: "products", Columns: []config.DatabaseColumn{{Name: "id", Type: "BIGINT"}}}}}},
 		Permissions: []config.DatabasePermission{{User: "reader", Database: "catalog", Privileges: []string{"SELECT"}}},
 		Replication: config.Replication{PrimaryHost: "10.0.0.10", PrimaryPort: 5432, User: "replicator", PasswordEnv: "REPLICATION_PASSWORD", Slot: "catalog_replica"},
@@ -94,6 +93,40 @@ func TestReplicaPlanSkipsDatabaseChainWrites(t *testing.T) {
 		if strings.Contains(step.Description, "database user") || strings.Contains(step.Description, "database catalog") || strings.Contains(step.Description, "table") || strings.Contains(step.Description, "permissions") {
 			t.Fatalf("replica plan contains write-side database step %q", step.Description)
 		}
+	}
+}
+
+func TestReplicaPlanCreatesExplicitLocalDatabaseUser(t *testing.T) {
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "postgresql",
+		Role:     "replica",
+		Port:     5433,
+		DataDir:  "/var/lib/postgresql/replica",
+		Users:    []config.DatabaseUser{{Name: "local_reader", PasswordEnv: "LOCAL_READER_PASSWORD"}},
+		Replication: config.Replication{
+			PrimaryHost: "10.0.0.10",
+			PrimaryPort: 5432,
+			User:        "replicator",
+			PasswordEnv: "REPLICATION_PASSWORD",
+			Slot:        "catalog_replica",
+		},
+	}
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, step := range p.Steps {
+		if step.Description == "Create PostgreSQL database users" {
+			found = true
+			if !strings.Contains(step.Input, "local_reader") {
+				t.Fatalf("local replica user SQL = %q", step.Input)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("replica plan did not create the explicit local database user")
 	}
 }
 

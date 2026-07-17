@@ -232,6 +232,37 @@ func TestTUIDatabaseUserManagementCreatesUser(t *testing.T) {
 	}
 }
 
+func TestTUIDatabaseUserManagementCanCreateLocalReplicaUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replica-database-user.json")
+	c := config.Default()
+	c.Database = &config.Database{
+		Provider: "postgresql",
+		Role:     "replica",
+		DataDir:  "/var/lib/postgresql/replica",
+		Replication: config.Replication{
+			PrimaryHost: "10.0.0.10",
+			PrimaryPort: 5432,
+			User:        "replicator",
+			PasswordEnv: "REPLICATION_PASSWORD",
+		},
+	}
+	if err := config.Write(path, c); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	in := bytes.NewBufferString("12\n2\n1\ny\nlocal_reader\nLOCAL_READER_PASSWORD\n0\n0\n0\n")
+	if err := Run([]string{"tui", "-f", path}, in, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Database == nil || len(got.Database.Users) != 1 || got.Database.Users[0].Name != "local_reader" {
+		t.Fatalf("replica database users = %#v, want local_reader user", got.Database)
+	}
+}
+
 func TestTUIConfiguresPostgresReplica(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replica.json")
 	in := bytes.NewBufferString("1\nreplica.example.com\n\n\nphp\npostgresql\nreplica\n")

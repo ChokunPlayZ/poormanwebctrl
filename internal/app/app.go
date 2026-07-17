@@ -856,9 +856,9 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 		switch choice {
 		case "1":
 			if d.Role == "replica" {
-				ui.warn("Replicas are read-only; create the user on the primary.")
-				pause(reader, ui)
-				continue
+				if !yesNo(selectOption(reader, ui, "Create this database user locally on the replica?", "n", "y", "n")) {
+					continue
+				}
 			}
 			if err := createDatabaseUser(d, reader, ui); err != nil {
 				ui.warn(err.Error())
@@ -868,7 +868,11 @@ func databaseUsersTUI(path string, reader *bufio.Reader, ui *terminalUI) error {
 			if err := config.Write(path, c); err != nil {
 				return err
 			}
-			ui.success("Database user created")
+			if d.Role == "replica" {
+				ui.success("Database user created locally on replica")
+			} else {
+				ui.success("Database user created")
+			}
 		case "2":
 			if len(users) == 0 {
 				ui.warn("No database users exist; create one first.")

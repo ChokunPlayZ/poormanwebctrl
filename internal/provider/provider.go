@@ -408,6 +408,12 @@ func addDatabase(pn *plan.Plan, c config.Config, p platform.Platform) {
 	if d.Role != "standalone" {
 		addReplication(pn, *d, p)
 	}
+	if d.Role == "replica" {
+		// Replica users are intentionally local-only. Databases, tables, and
+		// grants still come from replication, but an operator may opt a user
+		// into this replica from the TUI.
+		addDatabaseUsers(pn, *d)
+	}
 }
 
 func addDatabaseObjects(pn *plan.Plan, d config.Database) {
@@ -416,20 +422,8 @@ func addDatabaseObjects(pn *plan.Plan, d config.Database) {
 	if len(databases) == 0 && len(users) == 0 && len(d.Permissions) == 0 {
 		return
 	}
+	addDatabaseUsers(pn, d)
 	if d.Provider == "postgresql" {
-		if len(users) > 0 {
-			var sql strings.Builder
-			for _, user := range users {
-				fmt.Fprintf(&sql, "DO $poorman$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s LOGIN PASSWORD '${%s}'; ELSE ALTER ROLE %s LOGIN PASSWORD '${%s}'; END IF; END $poorman$;\n", user.Name, quotePostgres(user.Name), user.PasswordEnv, quotePostgres(user.Name), user.PasswordEnv)
-			}
-			description := "Create PostgreSQL database users"
-			if len(databases) == 1 && len(users) == 1 && d.Name != "" && d.User != "" {
-				description = "Create PostgreSQL application database and user"
-			}
-			step := plan.AsUser(description, "postgres", "psql", "-v", "ON_ERROR_STOP=1")
-			step.Input, step.Sensitive, step.SQLSecrets = sql.String(), true, true
-			pn.Add(step)
-		}
 		for _, database := range databases {
 			var sql strings.Builder
 			owner := database.Owner
@@ -448,17 +442,6 @@ func addDatabaseObjects(pn *plan.Plan, d config.Database) {
 		}
 		addPostgresPermissions(pn, d.ManagedPermissions())
 		return
-	}
-	for _, user := range users {
-		host := user.Host
-		if host == "" {
-			host = "localhost"
-		}
-		input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%s' IDENTIFIED BY '${%s}';\n", user.Name, host, user.PasswordEnv, user.Name, host, user.PasswordEnv)
-		step := plan.Cmd("Create MariaDB database user "+user.Name, "mariadb", true, mariaDBCommandArgs(d, "--batch", "--skip-column-names", "--connect-timeout=10")...)
-		step.Input, step.Sensitive, step.SQLSecrets = input, true, true
-		step.TimeoutSeconds = 60
-		pn.Add(step)
 	}
 	hosts := map[string]string{}
 	for _, user := range users {
@@ -496,6 +479,43 @@ func addDatabaseObjects(pn *plan.Plan, d config.Database) {
 		pn.Add(step)
 	}
 	addMariaDBPermissions(pn, d.ManagedPermissions(), users, d)
+}
+
+func addDatabaseUsers(pn *plan.Plan, d config.Database) {
+	users := d.ManagedUsers()
+	if d.Role == "replica" {
+		// ManagedUsers includes legacy application shorthand. Replica users
+		// must be explicit so local accounts are never created by accident.
+		users = append([]config.DatabaseUser(nil), d.Users...)
+	}
+	if len(users) == 0 {
+		return
+	}
+	if d.Provider == "postgresql" {
+		var sql strings.Builder
+		for _, user := range users {
+			fmt.Fprintf(&sql, "DO $poorman$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s LOGIN PASSWORD '${%s}'; ELSE ALTER ROLE %s LOGIN PASSWORD '${%s}'; END IF; END $poorman$;\n", user.Name, quotePostgres(user.Name), user.PasswordEnv, quotePostgres(user.Name), user.PasswordEnv)
+		}
+		description := "Create PostgreSQL database users"
+		if len(d.ManagedDatabases()) == 1 && len(users) == 1 && d.Name != "" && d.User != "" {
+			description = "Create PostgreSQL application database and user"
+		}
+		step := plan.AsUser(description, "postgres", "psql", "-v", "ON_ERROR_STOP=1")
+		step.Input, step.Sensitive, step.SQLSecrets = sql.String(), true, true
+		pn.Add(step)
+		return
+	}
+	for _, user := range users {
+		host := user.Host
+		if host == "" {
+			host = "localhost"
+		}
+		input := fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '${%s}';\nALTER USER '%s'@'%s' IDENTIFIED BY '${%s}';\n", user.Name, host, user.PasswordEnv, user.Name, host, user.PasswordEnv)
+		step := plan.Cmd("Create MariaDB database user "+user.Name, "mariadb", true, mariaDBCommandArgs(d, "--batch", "--skip-column-names", "--connect-timeout=10")...)
+		step.Input, step.Sensitive, step.SQLSecrets = input, true, true
+		step.TimeoutSeconds = 60
+		pn.Add(step)
+	}
 }
 
 func mariaDBCommandArgs(d config.Database, args ...string) []string {
