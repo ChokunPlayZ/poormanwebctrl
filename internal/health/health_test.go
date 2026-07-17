@@ -29,3 +29,30 @@ func TestChecksUseIndependentMariaDBReplicaService(t *testing.T) {
 	}
 	t.Fatalf("health checks do not target the independent replica service: %#v", checks)
 }
+
+func TestServiceStateMapsSystemdStates(t *testing.T) {
+	tests := []struct {
+		output string
+		want   ServiceState
+	}{
+		{output: "active\n", want: ServiceUp},
+		{output: "inactive\n", want: ServiceDown},
+		{output: "failed\n", want: ServiceDown},
+		{output: "activating\n", want: ServiceChanging},
+		{output: "unknown\n", want: ServiceUnknown},
+	}
+	for _, tt := range tests {
+		if got := serviceState(tt.output, tt.want == ServiceUp, "debian"); got != tt.want {
+			t.Errorf("serviceState(%q) = %q, want %q", tt.output, got, tt.want)
+		}
+	}
+}
+
+func TestServiceStateMapsOpenRCStates(t *testing.T) {
+	if got := serviceState(" * status: started", true, "alpine"); got != ServiceUp {
+		t.Fatalf("started state = %q, want up", got)
+	}
+	if got := serviceState(" * status: stopped", false, "alpine"); got != ServiceDown {
+		t.Fatalf("stopped state = %q, want down", got)
+	}
+}

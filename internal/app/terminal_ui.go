@@ -2,10 +2,12 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -13,13 +15,17 @@ import (
 	"unicode/utf8"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
+	"github.com/chokunplayz/poormanwebctrl/internal/health"
 	"github.com/chokunplayz/poormanwebctrl/internal/managed"
+	"github.com/chokunplayz/poormanwebctrl/internal/platform"
 )
 
 type terminalUI struct {
 	io.Writer
-	ansi  bool
-	input *os.File
+	ansi               bool
+	input              *os.File
+	confirmSetupCancel bool
+	setupCanceled      bool
 }
 
 const (
@@ -117,11 +123,11 @@ func padPanelLine(value string, width int) string {
 	return value + strings.Repeat(" ", width-displayWidth(value))
 }
 
-func (ui *terminalUI) dashboard(c config.Config, path string) {
-	ui.dashboardSelected(c, path, 1)
+func (ui *terminalUI) dashboard(ctx context.Context, c config.Config, path string) {
+	ui.dashboardSelected(c, path, 1, dashboardServiceStatuses(ctx, c, path))
 }
 
-func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected int) {
+func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected int, statuses []health.ServiceStatus) {
 	ui.brand("operations", "A calm control surface for your self-hosted stack")
 	db := "none"
 	role := "—"
@@ -145,6 +151,7 @@ func (ui *terminalUI) dashboardSelected(c config.Config, path string, selected i
 		databaseLine += "\ninstances " + strings.Join(labels, ", ")
 	}
 	ui.panel("STACK", fmt.Sprintf("web       %s\ndatabase  %s\nsite      %s\nconfig    %s", c.WebServer.Provider, databaseLine, site, path))
+	ui.panel("MANAGED SERVICES", ui.managedServiceStatusLines(statuses))
 	ui.panel("GUARDRAILS", fmt.Sprintf("https   %s     firewall  %s     backups  %s", ui.status(enabledLabel(c.TLS.Enabled), c.TLS.Enabled), ui.status(enabledLabel(c.Firewall.Enabled), c.Firewall.Enabled), ui.status(enabledLabel(c.Backups.Enabled), c.Backups.Enabled)))
 	replicationAction := "replication status"
 	if c.Database == nil || c.Database.Role == "standalone" || c.Database.Role == "" {
@@ -187,14 +194,15 @@ func dashboardActionLine(left, right, selected int, leftLabel, rightLabel string
 	return fmt.Sprintf("%s%-2d  %-*s%s%-2d  %s", leftMarker, left, dashboardLabelWidth, leftLabel, rightMarker, right, rightLabel)
 }
 
-func dashboardChoice(in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
+func dashboardChoice(ctx context.Context, in io.Reader, reader *bufio.Reader, ui *terminalUI, c config.Config, path string) string {
+	statuses := dashboardServiceStatuses(ctx, c, path)
 	file, ok := in.(*os.File)
 	if ok && isTerminal(file) && rawTerminalAvailable(file) {
-		if choice, rawOK := rawDashboardChoice(file, ui, c, path); rawOK {
+		if choice, rawOK := rawDashboardChoice(file, ui, c, path, statuses); rawOK {
 			return choice
 		}
 	}
-	ui.dashboard(c, path)
+	ui.dashboardSelected(c, path, 1, statuses)
 	return selectMenu(reader, ui, "Select action", "1",
 		selectorChoice{Value: "1", Label: "preview plan"},
 		selectorChoice{Value: "2", Label: "apply changes"},
@@ -223,7 +231,7 @@ func isTerminal(file *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path string) (string, bool) {
+func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path string, statuses []health.ServiceStatus) (string, bool) {
 	getState := exec.Command("stty", "-g")
 	getState.Stdin = file
 	state, err := getState.Output()
@@ -244,7 +252,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 	selected := 1
 	typed := ""
 	ui.clear()
-	ui.dashboardSelected(c, path, selected)
+	ui.dashboardSelected(c, path, selected, statuses)
 	for {
 		b, ok := readRawByte(file)
 		if !ok {
@@ -285,7 +293,7 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 				continue
 			}
 			ui.clear()
-			ui.dashboardSelected(c, path, selected)
+			ui.dashboardSelected(c, path, selected, statuses)
 		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 			typed += string(b)
 		case 8, 127:
@@ -294,6 +302,52 @@ func rawDashboardChoice(file *os.File, ui *terminalUI, c config.Config, path str
 			}
 		}
 	}
+}
+
+func dashboardServiceStatuses(ctx context.Context, c config.Config, path string) []health.ServiceStatus {
+	services := managedServices(c, path)
+	p, err := platform.Detect()
+	if err != nil {
+		return health.ServiceStatuses(ctx, services, platform.Platform{})
+	}
+	return health.ServiceStatuses(ctx, services, p)
+}
+
+func (ui *terminalUI) managedServiceStatusLines(statuses []health.ServiceStatus) string {
+	if len(statuses) == 0 {
+		return ui.paint("38;5;244", "No managed services recorded")
+	}
+	lines := make([]string, 0, len(statuses)+1)
+	up, down, changing, unknown := 0, 0, 0, 0
+	for _, status := range statuses {
+		label := managed.InstanceLabel(status.Service)
+		if status.Service.Role != "" {
+			label += " [" + status.Service.Role + "]"
+		}
+		if status.Service.Kind == "database" && status.Service.ConfigPath != "" {
+			label += " · " + filepath.Base(status.Service.ConfigPath)
+		}
+		stateLabel := strings.ToUpper(string(status.State))
+		state := "● " + fmt.Sprintf("%-8s", stateLabel)
+		switch status.State {
+		case health.ServiceUp:
+			up++
+			state = ui.paint("38;5;42;1", state)
+		case health.ServiceDown:
+			down++
+			state = ui.paint("38;5;196;1", state)
+		case health.ServiceChanging:
+			changing++
+			state = ui.paint("38;5;214;1", state)
+		default:
+			unknown++
+			state = ui.paint("38;5;244", state)
+		}
+		lines = append(lines, fmt.Sprintf("%s  %-8s  %s", state, status.Service.Kind, label))
+	}
+	summary := fmt.Sprintf("%d up · %d down · %d changing · %d unknown", up, down, changing, unknown)
+	lines = append(lines, ui.paint("38;5;244", summary))
+	return strings.Join(lines, "\n")
 }
 
 func (ui *terminalUI) status(label string, good bool) string {
@@ -316,8 +370,16 @@ func enabledLabel(enabled bool) string {
 	return "disabled"
 }
 
-func prompt(reader *bufio.Reader, out io.Writer, label, fallback string) string {
-	fmt.Fprintf(out, "%s [%s]: ", label, fallback)
+func prompt(reader *bufio.Reader, ui *terminalUI, label, fallback string) string {
+	if ui.setupCanceled {
+		return fallback
+	}
+	if ui.confirmSetupCancel && ui.input != nil && isTerminal(ui.input) && reader.Buffered() == 0 {
+		if value, ok := rawPrompt(ui, label, fallback); ok {
+			return value
+		}
+	}
+	fmt.Fprintf(ui, "%s [%s]: ", label, fallback)
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
@@ -351,6 +413,9 @@ func selectMenu(reader *bufio.Reader, ui *terminalUI, label, fallback string, op
 }
 
 func selectChoices(reader *bufio.Reader, ui *terminalUI, label, fallback string, options ...selectorChoice) string {
+	if ui.setupCanceled {
+		return escapeOption(fallback, options)
+	}
 	if len(options) == 0 {
 		return prompt(reader, ui, label, fallback)
 	}
@@ -402,7 +467,11 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []selectorC
 		restore.Stdin = file
 		_ = restore.Run()
 	}()
-	raw := exec.Command("stty", "-icanon", "-echo", "min", "1", "time", "0")
+	rawArgs := []string{"-icanon", "-echo", "min", "1", "time", "0"}
+	if ui.confirmSetupCancel {
+		rawArgs = append(rawArgs, "-isig")
+	}
+	raw := exec.Command("stty", rawArgs...)
 	raw.Stdin = file
 	if err := raw.Run(); err != nil {
 		return "", false
@@ -434,6 +503,12 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []selectorC
 			return "", false
 		}
 		switch b {
+		case 0x03:
+			if ui.confirmSetupCancel && confirmSetupCancellation(ui, file) {
+				ui.setupCanceled = true
+				return escapeOption(fallback, options), true
+			}
+			render()
 		case '\r', '\n':
 			fmt.Fprintf(ui, "Selected: %s\n", options[selected].Label)
 			return options[selected].Value, true
@@ -475,10 +550,102 @@ func rawSelectOption(ui *terminalUI, label, fallback string, options []selectorC
 	}
 }
 
-func readRawByte(file *os.File) (byte, bool) {
+func rawPrompt(ui *terminalUI, label, fallback string) (string, bool) {
+	file := ui.input
+	getState := exec.Command("stty", "-g")
+	getState.Stdin = file
+	state, err := getState.Output()
+	if err != nil {
+		return "", false
+	}
+	defer func() {
+		restore := exec.Command("stty", strings.TrimSpace(string(state)))
+		restore.Stdin = file
+		_ = restore.Run()
+	}()
+	raw := exec.Command("stty", "-icanon", "-echo", "-isig", "min", "1", "time", "0")
+	raw.Stdin = file
+	if err := raw.Run(); err != nil {
+		return "", false
+	}
+
+	fmt.Fprintf(ui, "%s [%s]: ", label, fallback)
+	value := make([]byte, 0, len(fallback))
+	for {
+		b, ok := readRawByte(file)
+		if !ok {
+			return "", false
+		}
+		switch b {
+		case 0x03:
+			if confirmSetupCancellation(ui, file) {
+				ui.setupCanceled = true
+				return fallback, true
+			}
+			fmt.Fprintf(ui, "%s [%s]: %s", label, fallback, string(value))
+		case '\r', '\n':
+			fmt.Fprintln(ui)
+			answer := strings.TrimSpace(string(value))
+			if answer == "" {
+				return fallback, true
+			}
+			return answer, true
+		case 4:
+			fmt.Fprintln(ui)
+			if len(value) == 0 {
+				return fallback, true
+			}
+			return strings.TrimSpace(string(value)), true
+		case 8, 127:
+			if len(value) > 0 {
+				_, size := utf8.DecodeLastRune(value)
+				value = value[:len(value)-size]
+				fmt.Fprint(ui, "\b \b")
+			}
+		default:
+			if b >= 0x20 {
+				value = append(value, b)
+				fmt.Fprint(ui, string([]byte{b}))
+			}
+		}
+	}
+}
+
+func confirmSetupCancellation(ui *terminalUI, input io.Reader) bool {
+	fmt.Fprint(ui, "\nCancel setup? [y/N] ")
+	answer := byte(0)
+	for {
+		b, ok := readRawByte(input)
+		if !ok {
+			fmt.Fprintln(ui)
+			return answer == 'y' || answer == 'Y'
+		}
+		switch b {
+		case 'y', 'Y':
+			answer = b
+			fmt.Fprint(ui, string([]byte{b}))
+		case 'n', 'N':
+			answer = b
+			fmt.Fprint(ui, string([]byte{b}))
+		case 8, 127:
+			if answer != 0 {
+				answer = 0
+				fmt.Fprint(ui, "\b \b")
+			}
+		case '\r', '\n':
+			fmt.Fprintln(ui)
+			return answer == 'y' || answer == 'Y'
+		case 0x03:
+			fmt.Fprintln(ui)
+			return false
+		}
+	}
+}
+
+func readRawByte(input io.Reader) (byte, bool) {
 	for {
 		var b [1]byte
-		n, err := file.Read(b[:])
+		n, err := input.Read(b[:])
 		if n == 1 {
 			return b[0], true
 		}

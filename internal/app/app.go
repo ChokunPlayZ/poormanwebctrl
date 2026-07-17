@@ -62,7 +62,11 @@ func replicaCommand(ctx context.Context, args []string, in io.Reader, out, errOu
 	}
 	action := args[0]
 	if action == "setup" {
-		return guidedReplicaSetup(args[1:], in, out)
+		err := guidedReplicaSetup(args[1:], in, out)
+		if errors.Is(err, errSetupCanceled) {
+			return nil
+		}
+		return err
 	}
 	if action != "status" && action != "promote" {
 		return fmt.Errorf("unknown replica action %q", action)

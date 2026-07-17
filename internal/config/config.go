@@ -290,7 +290,6 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("unsupported web server %q", c.WebServer.Provider)
 	}
-	users := map[string]bool{}
 	for i, u := range c.Access.Users {
 		if !nameRE.MatchString(u.Name) {
 			return fmt.Errorf("access user %d has invalid name %q", i+1, u.Name)
@@ -303,7 +302,6 @@ func (c Config) Validate() error {
 				return fmt.Errorf("access user %q has an invalid SSH public key", u.Name)
 			}
 		}
-		users[u.Name] = true
 	}
 	if c.Access.FTP.Enabled && !c.Access.FTP.AllowPlaintext {
 		return fmt.Errorf("FTP is plaintext; set access.ftp.allow_plaintext=true to explicitly accept the risk, or use SFTP")
@@ -331,8 +329,8 @@ func (c Config) Validate() error {
 			}
 			seenSites[aliasKey] = s.Domain
 		}
-		if s.Owner != "" && !users[s.Owner] {
-			return fmt.Errorf("site %q references unknown owner %q", s.Domain, s.Owner)
+		if s.Owner != "" && !nameRE.MatchString(s.Owner) {
+			return fmt.Errorf("site %q has invalid owner %q", s.Domain, s.Owner)
 		}
 		if s.Runtime != "" && s.Runtime != "static" && s.Runtime != "php" {
 			return fmt.Errorf("site %q runtime must be static or php", s.Domain)

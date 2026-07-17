@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
+	"github.com/chokunplayz/poormanwebctrl/internal/health"
 	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 )
 
@@ -20,6 +21,32 @@ func TestInputReaderPreservesExistingBuffer(t *testing.T) {
 	}
 	if got, _ := reader.ReadString('\n'); got != "\n" {
 		t.Fatalf("queued Enter = %q, want a blank line", got)
+	}
+}
+
+func TestConfirmSetupCancellation(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "yes", input: "y\n", want: true},
+		{name: "uppercase yes", input: "Y\n", want: true},
+		{name: "no", input: "n\n", want: false},
+		{name: "enter defaults to no", input: "\n", want: false},
+		{name: "ctrl-c defaults to no", input: "\x03", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			ui := newTerminalUI(&out)
+			if got := confirmSetupCancellation(ui, strings.NewReader(tt.input)); got != tt.want {
+				t.Fatalf("confirmation = %t, want %t", got, tt.want)
+			}
+			if !strings.Contains(out.String(), "Cancel setup? [y/N]") {
+				t.Fatalf("prompt missing from %q", out.String())
+			}
+		})
 	}
 }
 
@@ -803,6 +830,45 @@ func TestDatabaseInstancesIncludesPrimaryAndReplica(t *testing.T) {
 	}
 	if managed.InstanceLabel(instances[0]) == managed.InstanceLabel(instances[1]) {
 		t.Fatalf("database instance labels are not distinct: %#v", instances)
+	}
+}
+
+func TestManagedServicesIncludesEveryDatabaseRecord(t *testing.T) {
+	primaryPath := filepath.Join(t.TempDir(), "primary.json")
+	replicaPath := filepath.Join(t.TempDir(), "replica.json")
+	primary := config.Default()
+	replica := config.Default()
+	replica.Database.Role = "replica"
+	replica.Database.Port = 3307
+	replica.Database.DataDir = "/var/lib/mysql/poorman-replica-3307"
+	replica.Database.Replication.PrimaryHost = "127.0.0.1"
+	inventory := managed.Inventory{Version: 1, Services: append(
+		managed.DesiredServices(primary, primaryPath),
+		managed.DesiredServices(replica, replicaPath)...,
+	)}
+	services := managedServicesFrom(inventory, primary, primaryPath)
+	databaseCount := 0
+	for _, service := range services {
+		if service.Kind == "database" {
+			databaseCount++
+		}
+	}
+	if databaseCount != 2 {
+		t.Fatalf("managed services = %#v, want both database records", services)
+	}
+}
+
+func TestManagedServicePanelShowsEveryDatabaseStatus(t *testing.T) {
+	statuses := []health.ServiceStatus{
+		{Service: managed.Service{Kind: "database", Name: "mariadb", Role: "primary", Port: 3306, ConfigPath: "/etc/poorman/primary.json"}, State: health.ServiceUp},
+		{Service: managed.Service{Kind: "database", Name: "poorman-mariadb-replica-3307", Role: "replica", Port: 3307, ConfigPath: "/etc/poorman/replica.json"}, State: health.ServiceDown},
+	}
+	var out bytes.Buffer
+	text := newTerminalUI(&out).managedServiceStatusLines(statuses)
+	for _, want := range []string{"UP", "DOWN", "primary.json", "replica.json", "1 up · 1 down"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status panel missing %q:\n%s", want, text)
+		}
 	}
 }
 

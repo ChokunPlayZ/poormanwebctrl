@@ -15,6 +15,8 @@ import (
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
 )
 
+var errSetupCanceled = errors.New("setup canceled")
+
 func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -35,6 +37,7 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	ui.confirmSetupCancel = true
 
 	reader := bufio.NewReader(in)
 	ui.clear()
@@ -66,6 +69,10 @@ func tuiCommand(ctx context.Context, args []string, in io.Reader, out io.Writer)
 	}
 	tlsEnabled := yesNo(selectOption(reader, ui, "Enable HTTPS with Let's Encrypt?", "y", "y", "n"))
 	backupEnabled := yesNo(selectOption(reader, ui, "Enable nightly backups?", "y", "y", "n"))
+	if ui.setupCanceled {
+		ui.muted("Cancelled.")
+		return nil
+	}
 
 	c := config.Config{
 		Version:   1,
@@ -199,8 +206,14 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
-	ui := newTerminalUI(out)
-	attachTerminalInput(ui, in)
+	ui, usingParentUI := out.(*terminalUI)
+	if !usingParentUI {
+		ui = newTerminalUI(out)
+		attachTerminalInput(ui, in)
+	}
+	previousConfirm := ui.confirmSetupCancel
+	ui.confirmSetupCancel = true
+	defer func() { ui.confirmSetupCancel = previousConfirm }()
 	reader := inputReader(in)
 	ui.brand("guided replica setup", "Attach a database replica with safe same-machine defaults")
 	providerName := "mariadb"
@@ -220,6 +233,10 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 	if err := configureReplication(reader, ui, database); err != nil {
 		return err
 	}
+	if ui.setupCanceled {
+		ui.muted("Cancelled.")
+		return errSetupCanceled
+	}
 	c.Database = database
 	if err := c.Validate(); err != nil {
 		return fmt.Errorf("replica configuration: %w", err)
@@ -228,6 +245,10 @@ func guidedReplicaSetup(args []string, in io.Reader, out io.Writer) error {
 		updatedSource, err := configureReplicaSource(*sourceConfig, database, reader, ui)
 		if err != nil {
 			return err
+		}
+		if ui.setupCanceled {
+			ui.muted("Cancelled.")
+			return errSetupCanceled
 		}
 		if err := config.Write(*from, updatedSource); err != nil {
 			return fmt.Errorf("save primary configuration: %w", err)
@@ -349,7 +370,7 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 			return err
 		}
 		ui.clear()
-		choice := dashboardChoice(in, reader, ui, c, path)
+		choice := dashboardChoice(ctx, in, reader, ui, c, path)
 		switch choice {
 		case "1":
 			if err := planCommand([]string{"-f", path}, ui); err != nil {
@@ -435,16 +456,31 @@ func tuiDashboard(ctx context.Context, path string, in io.Reader, ui *terminalUI
 }
 
 func guidedReplicaSetupTUI(ctx context.Context, primaryPath string, reader *bufio.Reader, ui *terminalUI) (string, error) {
+	previousConfirm := ui.confirmSetupCancel
+	ui.confirmSetupCancel = true
+	defer func() { ui.confirmSetupCancel = previousConfirm }()
 	ui.clear()
 	ui.brand("guided replica setup", "Create a separate replica configuration from this stack")
 	defaultPath := filepath.Join(filepath.Dir(primaryPath), "replica.json")
 	replicaPath := filepath.Clean(prompt(reader, ui, "Replica configuration file", defaultPath))
+	if ui.setupCanceled {
+		ui.muted("Cancelled.")
+		ui.setupCanceled = false
+		return "", nil
+	}
 	if replicaPath == filepath.Clean(primaryPath) {
 		return "", fmt.Errorf("replica configuration must be different from the primary configuration")
 	}
 	if err := guidedReplicaSetup([]string{"-f", replicaPath, "--from", primaryPath}, reader, ui); err != nil {
+		if errors.Is(err, errSetupCanceled) {
+			ui.setupCanceled = false
+			return "", nil
+		}
 		return "", err
 	}
+	// The setup itself is now saved. The remaining preview/apply questions use
+	// the normal Ctrl+C behavior for operations.
+	ui.confirmSetupCancel = false
 	if yesNo(selectOption(reader, ui, "Preview the primary and replica plans now?", "y", "y", "n")) {
 		if err := planCommand([]string{"-f", primaryPath}, ui); err != nil {
 			return replicaPath, err

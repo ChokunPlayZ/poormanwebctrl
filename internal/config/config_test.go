@@ -198,6 +198,22 @@ func TestRejectsDangerousManagedRoots(t *testing.T) {
 	}
 }
 
+func TestSiteOwnerMayBeAnExistingSystemUser(t *testing.T) {
+	c := Default()
+	c.Sites[0].Owner = "existing-user"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSiteRejectsInvalidOwnerName(t *testing.T) {
+	c := Default()
+	c.Sites[0].Owner = "invalid user"
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected invalid site owner validation error")
+	}
+}
+
 func TestAllExamplesAreValid(t *testing.T) {
 	paths, err := filepath.Glob("../../examples/*.json")
 	if err != nil {

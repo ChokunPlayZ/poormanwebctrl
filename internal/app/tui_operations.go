@@ -128,6 +128,61 @@ func databaseInstancesFrom(inventory managed.Inventory, c config.Config, path st
 	return instances
 }
 
+func managedServices(c config.Config, path string) []managed.Service {
+	inventory, err := managed.Load(managed.StatePath)
+	if err != nil {
+		inventory = managed.Inventory{}
+	}
+	return managedServicesFrom(inventory, c, path)
+}
+
+func managedServicesFrom(inventory managed.Inventory, c config.Config, path string) []managed.Service {
+	services := make([]managed.Service, 0, len(inventory.Services)+3)
+	seenKeys := map[string]bool{}
+	seenShared := map[string]bool{}
+	add := func(service managed.Service) {
+		if seenKeys[service.Key] {
+			return
+		}
+		// Database records represent distinct managed instances/configurations.
+		// Shared host services such as nginx and vsftpd only need one status row.
+		if service.Kind != "database" && seenShared[service.Kind+":"+service.Name] {
+			return
+		}
+		services = append(services, service)
+		seenKeys[service.Key] = true
+		if service.Kind != "database" {
+			seenShared[service.Kind+":"+service.Name] = true
+		}
+	}
+	for _, service := range inventory.Services {
+		add(service)
+	}
+	for _, service := range managed.DesiredServices(c, path) {
+		add(service)
+	}
+	sort.SliceStable(services, func(i, j int) bool {
+		kindOrder := func(kind string) int {
+			switch kind {
+			case "database":
+				return 0
+			case "web":
+				return 1
+			default:
+				return 2
+			}
+		}
+		if kindOrder(services[i].Kind) != kindOrder(services[j].Kind) {
+			return kindOrder(services[i].Kind) < kindOrder(services[j].Kind)
+		}
+		if services[i].Name != services[j].Name {
+			return services[i].Name < services[j].Name
+		}
+		return services[i].Key < services[j].Key
+	})
+	return services
+}
+
 func configuredServicesFor(c config.Config, path string) []string {
 	services := []string{webServiceName(c.WebServer.Provider)}
 	seen := map[string]bool{}

@@ -7,14 +7,91 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/chokunplayz/poormanwebctrl/internal/config"
+	"github.com/chokunplayz/poormanwebctrl/internal/managed"
 	"github.com/chokunplayz/poormanwebctrl/internal/platform"
 )
 
 type Check struct {
 	Name, Command string
 	Args          []string
+}
+
+type ServiceState string
+
+const (
+	ServiceUp       ServiceState = "up"
+	ServiceDown     ServiceState = "down"
+	ServiceChanging ServiceState = "changing"
+	ServiceUnknown  ServiceState = "unknown"
+)
+
+type ServiceStatus struct {
+	Service managed.Service
+	State   ServiceState
+}
+
+// ServiceStatuses returns a fast point-in-time snapshot for dashboard use.
+// A timeout is applied to every service so an unhealthy service manager cannot
+// make the operations dashboard unusable.
+func ServiceStatuses(ctx context.Context, services []managed.Service, p platform.Platform) []ServiceStatus {
+	statuses := make([]ServiceStatus, len(services))
+	var checks sync.WaitGroup
+	for i, service := range services {
+		statuses[i] = ServiceStatus{Service: service, State: ServiceUnknown}
+		if p.Family == "" {
+			continue
+		}
+		checks.Add(1)
+		go func(index int) {
+			defer checks.Done()
+			serviceCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			statuses[index].State = serviceStatus(serviceCtx, services[index].Name, p)
+		}(i)
+	}
+	checks.Wait()
+	return statuses
+}
+
+func serviceStatus(ctx context.Context, name string, p platform.Platform) ServiceState {
+	command := "systemctl"
+	args := []string{"is-active", name}
+	if p.Family == "alpine" {
+		command = "rc-service"
+		args = []string{name, "status"}
+	}
+	output, err := exec.CommandContext(ctx, command, args...).CombinedOutput()
+	return serviceState(string(output), err == nil, p.Family)
+}
+
+func serviceState(output string, succeeded bool, family string) ServiceState {
+	value := strings.ToLower(strings.TrimSpace(output))
+	if family == "alpine" {
+		switch {
+		case succeeded || strings.Contains(value, "started"):
+			return ServiceUp
+		case strings.Contains(value, "starting") || strings.Contains(value, "stopping"):
+			return ServiceChanging
+		case strings.Contains(value, "stopped") || strings.Contains(value, "crashed"):
+			return ServiceDown
+		default:
+			return ServiceUnknown
+		}
+	}
+	switch value {
+	case "active":
+		return ServiceUp
+	case "activating", "reloading", "deactivating":
+		return ServiceChanging
+	case "inactive", "failed", "dead":
+		return ServiceDown
+	default:
+		return ServiceUnknown
+	}
 }
 
 func Checks(c config.Config, p platform.Platform) []Check {

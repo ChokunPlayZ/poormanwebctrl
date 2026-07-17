@@ -374,6 +374,32 @@ func TestWebRootOwnershipUsesDeploymentOwnerAndRuntimeGroup(t *testing.T) {
 	}
 }
 
+func TestSitePlanVerifiesUnmanagedOwnerOnce(t *testing.T) {
+	c := config.Default()
+	c.Sites[0].Owner = "existing-user"
+	c.Sites = append(c.Sites, config.Site{Domain: "second.example.com", Root: "/var/www/second.example.com", Owner: "existing-user", Runtime: "static"})
+	p, err := Build(c, platform.Platform{Distro: "ubuntu", Family: "debian"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verificationCount, verificationIndex, firstRootIndex := 0, -1, -1
+	for i, step := range p.Steps {
+		if step.Description == "Verify existing system user existing-user" {
+			verificationCount++
+			verificationIndex = i
+			if step.Command != "id" || !slices.Equal(step.Args, []string{"-u", "existing-user"}) {
+				t.Fatalf("owner verification step = %#v", step)
+			}
+		}
+		if firstRootIndex < 0 && step.Description == "Create document root for example.com" {
+			firstRootIndex = i
+		}
+	}
+	if verificationCount != 1 || verificationIndex < 0 || firstRootIndex < 0 || verificationIndex >= firstRootIndex {
+		t.Fatalf("verification count/index = %d/%d, first root index = %d", verificationCount, verificationIndex, firstRootIndex)
+	}
+}
+
 func TestSitePlanCreatesReplaceableWelcomePage(t *testing.T) {
 	for _, tt := range []struct {
 		web, runtime, stack string

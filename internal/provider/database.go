@@ -105,7 +105,9 @@ func addPackageSteps(pn *plan.Plan, p platform.Platform, packages []string) {
 }
 
 func addUsers(pn *plan.Plan, c config.Config, p platform.Platform) {
+	managedUsers := make(map[string]bool, len(c.Access.Users))
 	for _, u := range c.Access.Users {
+		managedUsers[u.Name] = true
 		home := u.Home
 		if home == "" {
 			home = "/home/" + u.Name
@@ -121,6 +123,15 @@ func addUsers(pn *plan.Plan, c config.Config, p platform.Platform) {
 			pn.Add(plan.Dir("Create SSH directory for "+u.Name, filepath.Join(home, ".ssh"), u.Name, 0o700))
 			pn.Add(plan.ManagedFile("Install authorized SSH keys for "+u.Name, filepath.Join(home, ".ssh", "authorized_keys"), strings.Join(u.PublicKeys, "\n")+"\n", u.Name, 0o600))
 		}
+	}
+	verifiedUsers := map[string]bool{}
+	for _, site := range c.Sites {
+		owner := site.Owner
+		if owner == "" || managedUsers[owner] || verifiedUsers[owner] {
+			continue
+		}
+		pn.Add(plan.Cmd("Verify existing system user "+owner, "id", false, "-u", owner))
+		verifiedUsers[owner] = true
 	}
 	if hasSFTPOnly(c) {
 		content := "# Managed by poorman\nMatch Group poorman-sftp\n    ForceCommand internal-sftp\n    AllowTcpForwarding no\n    X11Forwarding no\n"

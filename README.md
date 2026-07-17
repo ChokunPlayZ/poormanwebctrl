@@ -42,7 +42,7 @@ The installer places `poorman` in `~/.local/bin`. Set `POORMAN_INSTALL_DIR` to c
 
 Provisioning is Linux-only. Ubuntu/Debian, RHEL-family Linux, and Alpine are modeled. Development and tests work on macOS.
 
-Press `Ctrl-C` to stop an in-progress operation safely. Completed steps are kept, the active command is canceled, and remaining steps are not started; rerun `apply` to continue from the idempotent plan.
+Press `Ctrl-C` during guided setup and Poorman will ask whether you want to cancel before discarding the setup. During an in-progress operation, `Ctrl-C` stops it safely: completed steps are kept, the active command is canceled, and remaining steps are not started; rerun `apply` to continue from the idempotent plan.
 
 ## Main commands
 
@@ -66,6 +66,8 @@ Each successful apply records poorman-managed services in `/var/lib/poorman/mana
 After the first apply, poorman is authoritative for every configuration file it records in that inventory. Every apply rewrites all current managed virtual hosts, removes obsolete managed vhost files after a site removal or web-server switch, and restores explicit service-appropriate ownership. Manual edits to poorman-managed configuration files are intentionally overwritten. The server login MOTD states this policy.
 
 Choose **Virtual hosts** in that dashboard to list, add, edit, or remove domains. Every host is planned independently, including its document root, aliases, runtime, WordPress setup, and managed server configuration.
+
+A virtual host owner may be declared under `access.users` or may be an existing system account. Poorman creates and configures declared access users; for an undeclared owner, it verifies that the account exists during apply and otherwise leaves the account untouched.
 
 Choose **Stack settings** to adjust the web server, database and replication role, TLS email/enabled state, firewall, and backup destination/schedule after setup.
 
